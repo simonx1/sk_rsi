@@ -1,0 +1,17 @@
+{
+  "proposer": {
+    "0": {
+      "s1": {
+        "edits": [{"path": "rules.txt", "append": "love => feature\n"}],
+        "manifest": {
+          "root_cause": {"id": "P1"},
+          "what": "Add the keyword 'love' for feature requests.",
+          "predicted": ["t06"],
+          "risk": "none"
+        }
+      }
+    }
+  },
+  "screen": {"0": {"s1": true}},
+  "select": {"0": "s1"}
+}

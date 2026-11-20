@@ -1,0 +1,59 @@
+{
+  "proposer": {
+    "0": {
+      "s1": {
+        "edits": [{"path": "rules.txt", "append": "charged => billing\nerror => bug\n"}],
+        "manifest": {
+          "root_cause": {"new": "rules cover too few keywords per label"},
+          "what": "Add the keywords 'charged' and 'error', which the failing billing and bug messages use.",
+          "predicted": ["t03", "t05"],
+          "risk": "A feature request that mentions an error would be labelled bug."
+        }
+      },
+      "s2": {
+        "edits": [{"path": "classify.py", "append": "\n# always answer billing\n"}],
+        "manifest": {
+          "root_cause": {"new": "the classifier is too strict"},
+          "what": "Loosen the classifier itself.",
+          "predicted": ["t03"],
+          "risk": "none"
+        }
+      },
+      "s3": {
+        "edits": [{"path": "rules.txt", "append": "twice => billing\n"}],
+        "raw_manifest": "I added a rule for 'twice'."
+      }
+    },
+    "1": {
+      "s1": {
+        "edits": [{"path": "rules.txt", "append": "add => feature\n"}],
+        "manifest": {
+          "root_cause": {"id": "P1"},
+          "what": "Add the keyword 'add' for feature requests.",
+          "predicted": ["t04", "t06"],
+          "risk": "Any message containing 'add', such as 'address', becomes a feature request."
+        }
+      },
+      "s2": {
+        "edits": [{"path": "rules.txt", "write": "crash => bug\ncharged => billing\nerror => bug\nlove => feature\n"}],
+        "manifest": {
+          "root_cause": {"new": "no rule covers feature requests"},
+          "what": "Add 'love' for feature requests and drop the 'invoice' rule as redundant.",
+          "predicted": ["t06"],
+          "risk": "Messages that only say 'invoice' lose their label."
+        }
+      },
+      "s3": {
+        "edits": [],
+        "manifest": {
+          "root_cause": {"id": "P1"},
+          "what": "No change needed.",
+          "predicted": [],
+          "risk": "none"
+        }
+      }
+    }
+  },
+  "screen": {"0": {"s1": true}, "1": {"s1": true, "s2": true}},
+  "select": {"0": "s1", "1": "s1"}
+}

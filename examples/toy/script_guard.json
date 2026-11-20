@@ -1,0 +1,17 @@
+{
+  "proposer": {
+    "0": {
+      "s1": {
+        "edits": [{"path": "rules.txt", "write": "zzz => other\n"}],
+        "manifest": {
+          "root_cause": {"new": "rules are too broad"},
+          "what": "Replace every rule with one narrow rule.",
+          "predicted": [],
+          "risk": "Everything that passed may fail."
+        }
+      }
+    }
+  },
+  "screen": {"0": {"s1": true}},
+  "select": {"0": "s1"}
+}

@@ -1,0 +1,17 @@
+{
+  "proposer": {
+    "0": {
+      "s1": {
+        "edits": [{"path": "rules.txt", "append": "charged => billing\nerror => bug\n"}],
+        "manifest": {
+          "root_cause": {"new": "rules cover too few keywords per label"},
+          "what": "Add the keywords 'charged' and 'error'.",
+          "predicted": ["t03", "t05"],
+          "risk": "none"
+        }
+      }
+    }
+  },
+  "screen": {},
+  "select": {}
+}

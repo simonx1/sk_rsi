@@ -1,0 +1,12 @@
+{"id": "t01", "text": "refund my invoice", "label": "billing"}
+{"id": "t02", "text": "app crashes on login", "label": "bug"}
+{"id": "t03", "text": "charged twice this month", "label": "billing"}
+{"id": "t04", "text": "please add dark mode", "label": "feature"}
+{"id": "t05", "text": "error 500 when saving", "label": "bug"}
+{"id": "t06", "text": "would love an export option", "label": "feature"}
+{"id": "t07", "text": "invoice shows wrong amount", "label": "billing"}
+{"id": "t08", "text": "crash after update", "label": "bug"}
+{"id": "t09", "text": "add support for csv", "label": "feature"}
+{"id": "t10", "text": "double charged on card", "label": "billing"}
+{"id": "t11", "text": "save button gives error", "label": "bug"}
+{"id": "t12", "text": "love to see an api", "label": "feature"}
