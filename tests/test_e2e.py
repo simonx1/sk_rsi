@@ -5,7 +5,11 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
+import sys
+import time
+from pathlib import Path
 from unittest import mock
 
 from rsi import evaluator, loop, tasks
@@ -141,13 +145,18 @@ class TwoRoundsTest(ToyCase):
         for root in (self.rl.agents, self.rl.feedback, self.rl.history):
             self.assertFalse(root.is_relative_to(Layout("toy").private))
 
-    def test_every_agent_call_denies_the_private_directory(self):
-        private = str(Layout("toy").private.resolve()).lstrip("/")
+    def test_every_agent_call_denies_private_data_and_makes_shared_folders_read_only(self):
+        rule = lambda verb, path: f"{verb}(//" + str(path).lstrip("/") + "/**)"
+        private = Layout("toy").private
         settings = sorted(self.rl.agents.rglob("settings.json"))
         self.assertEqual(len(settings), 10)  # 3 proposers + screen + select, in each of 2 rounds
         for path in settings:
             deny = json.loads(path.read_text())["permissions"]["deny"]
-            self.assertEqual(deny, [f"Read(//{private}/**)", f"Edit(//{private}/**)"], str(path))
+            expected = [rule("Read", private), rule("Edit", private),
+                        rule("Edit", self.rl.feedback), rule("Edit", self.rl.history)]
+            if path.parent.name in ("screen", "select"):  # the selector only reads the run branch's worktree
+                expected.append(rule("Edit", self.rl.worktrees / "main"))
+            self.assertEqual(deny, expected, str(path))
 
 
 class GuardsTest(ToyCase):
@@ -216,6 +225,41 @@ class GuardsTest(ToyCase):
         self.assertEqual(st.rounds_log[0]["dropped"],
                          [{"sample": "s1", "reason": "check failed with exit code 1"}])
 
+    def test_a_selector_that_edits_the_worktree_changes_nothing(self):
+        project = self.make_toy()
+        tamper = "echo 'zzz => other' > rules.txt; echo '{}' > .rsi/sim.json; echo x > stray.txt; "
+        text = (project / loop.CONFIG_PATH).read_text().replace('selector = "', 'selector = "' + tamper)
+        self.assertIn(tamper, text)
+        (project / loop.CONFIG_PATH).write_text(text)
+        git(project, "commit", "-q", "-am", "a selector that edits files")
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
+        self.assertEqual(len(memory["problems"][0]["attempts"]), 2)
+        tree = git(project, "ls-tree", "-r", "--name-only", st.branch).splitlines()
+        self.assertNotIn("stray.txt", tree)
+        self.assertNotIn("zzz", git(project, "show", f"{st.branch}:rules.txt"))
+
+    def test_files_the_commit_does_not_hold_are_gone_before_scoring(self):
+        project = self.make_toy(rounds=1, candidates=1,
+                                run_task=f"test ! -e override.log && {sys.executable} score.py {{task_file}} {{checkout}} {{out}}")
+        (project / ".gitignore").write_text("*.log\n")
+        git(project, "add", ".gitignore")
+        git(project, "commit", "-q", "-m", "ignore logs")
+        script = self.tmp / "override.json"
+        script.write_text(json.dumps({
+            "proposer": {"0": {"s1": {
+                "edits": [{"path": "rules.txt", "append": "charged => billing\nerror => bug\n"},
+                          {"path": "override.log", "write": "an ignored file a scorer might read"}],
+                "manifest": {"root_cause": {"new": "a"}, "what": "x", "predicted": ["t03"], "risk": ""}}}},
+            "screen": {"0": {"s1": True}}, "select": {"0": "s1"},
+        }))
+        self.use_script(str(script))
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67])
+        self.assertEqual(history(st, 0, "s1/result.json")["files"], ["rules.txt"])
+
     def test_wall_clock_limit_stops_new_rounds(self):
         project = self.make_toy()
         with mock.patch.object(loop, "_out_of_time", return_value=True):
@@ -274,6 +318,38 @@ class ResumeTest(ToyCase):
         log = git(project, "show", f"{st.branch}:.rsi/log.md")
         self.assertEqual(log.count(f"| {st.run} | 0 |"), 1)
         self.assertEqual(len(st.rounds_log), 1)
+
+
+class KillTest(ToyCase):
+    def test_resume_after_the_process_is_killed_outright(self):
+        """SIGKILL gives the process no chance to clean up: no handlers, no finally blocks, a stale lock."""
+        project = self.make_toy()
+        call_log = self.tmp / "calls.log"
+        src = Path(__file__).resolve().parents[1] / "src"
+        env = dict(os.environ, TOY_CALL_LOG=str(call_log), TOY_DELAY="0.15", PYTHONPATH=str(src))
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "rsi", "run", "--no-promote", "--project", str(project)],
+            env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.monotonic() + 120
+        ran = lambda: len(call_log.read_text().splitlines()) if call_log.exists() else 0
+        while ran() < 14 and proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)  # 12 rollouts score the starting harness; the 14th is inside round 0
+        proc.kill()
+        proc.wait()
+        self.assertEqual(proc.returncode, -signal.SIGKILL)
+        layout = Layout("toy")
+        stopped = loop.find_unfinished(layout)
+        self.assertEqual((stopped.status, stopped.round), ("running", 0))
+        self.assertTrue(layout.lock_file.exists())
+        time.sleep(1)  # scorers the dead process started run in their own session and finish on their own
+
+        st = loop.run(project, promote=False)
+        self.assertEqual((st.run, st.status), (stopped.run, "done"))
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
+        self.assertEqual([a["round"] for a in memory["problems"][0]["attempts"]], [0, 1])
+        self.assertFalse(layout.lock_file.exists())
 
 
 class ContinuationTest(ToyCase):

@@ -38,6 +38,8 @@ class LoadTasksTest(unittest.TestCase):
         self.assert_error("[1]\n", ":1: must be a JSON object")
         self.assert_error('{"id": "a"}\n{"text": "x"}\n', ":2: id must match")
         self.assert_error('{"id": "a b"}\n', ":1: id must match")
+        for unsafe in ("..", ".", ".hidden", "-flag"):
+            self.assert_error(json.dumps({"id": unsafe}) + "\n", ":1: id must match")
         self.assert_error('{"id": "a"}\n{"id": "a"}\n', ":2: duplicate id a")
 
 
@@ -86,6 +88,12 @@ class StateFilesTest(unittest.TestCase):
         first = tasks.load_split(self.layout, ["a", "b", "c", "d"], 0.5)
         self.assertEqual(json.loads(self.layout.split_file.read_text()), first)
         self.assertEqual(tasks.load_split(self.layout, ["d", "c", "b", "a"], 0.5), first)
+
+    def test_a_saved_split_wins_over_what_would_be_computed(self):
+        self.layout.private.mkdir(parents=True)
+        self.layout.split_file.write_text(json.dumps({"a": "heldout", "b": "heldout", "c": "heldout"}))
+        split = tasks.load_split(self.layout, ["a", "b", "c", "d"], 0.5)
+        self.assertEqual(split, {"a": "heldout", "b": "heldout", "c": "heldout", "d": "evolve"})
 
     def test_benchmark_version_starts_at_one(self):
         self.assertEqual(tasks.benchmark_version(self.layout), 1)

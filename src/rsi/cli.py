@@ -94,8 +94,13 @@ def _status_lines(st: RunState, layout: Layout) -> list[str]:
     if st.scores:
         lines.append("Evolve: " + " → ".join(f"{score:.2f}" for score in st.scores))
     if "start" in st.heldout:
-        end = f"{st.heldout['end']:.2f}" if "end" in st.heldout else "not scored yet"
-        lines.append(f"Held-out: {st.heldout['start']:.2f} → {end}")
+        rounds = st.heldout.get("rounds", {})
+        if rounds:  # scored after every round; the last of these is the final score
+            points = [st.heldout["start"]] + [rounds[key] for key in sorted(rounds, key=int)]
+            lines.append("Held-out: " + " → ".join(f"{score:.2f}" for score in points))
+        else:
+            end = f"{st.heldout['end']:.2f}" if "end" in st.heldout else "not scored yet"
+            lines.append(f"Held-out: {st.heldout['start']:.2f} → {end}")
     if st.promoted:
         lines += _promotion_lines(st.promoted)
     lines.append(f"Pending tasks from live outcomes: {tasks.pending_count(layout)}")

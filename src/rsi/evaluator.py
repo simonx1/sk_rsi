@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import shutil
 import tempfile
@@ -13,7 +12,7 @@ from pathlib import Path
 
 from . import shell
 from .config import Config
-from .state import write_json_atomic
+from .state import Layout, write_json_atomic
 
 MARKER = "rollout.json"  # written last; a rollout directory without it is unfinished
 
@@ -34,15 +33,13 @@ def _read_result(out_dir: Path) -> tuple[float, str]:
         raise ValueError("result.json missing") from None
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ValueError("result.json is not JSON") from None
+    except OSError:
+        raise ValueError("result.json could not be read") from None
     if not isinstance(obj, dict):
         raise ValueError("result.json is not an object")
     score = obj.get("score")
-    valid = (
-        isinstance(score, (int, float))
-        and not isinstance(score, bool)
-        and not math.isnan(score)
-        and 0 <= score <= 1
-    )
+    # NaN fails the range test, and so does an integer too large to be a float.
+    valid = isinstance(score, (int, float)) and not isinstance(score, bool) and 0 <= score <= 1
     if not valid:
         raise ValueError("score must be a number from 0 to 1")
     summary = obj.get("summary", "")
@@ -57,8 +54,11 @@ def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: 
     if out_dir.exists():
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
-    # The task holds its expected answer, so its file stays out of out_dir, which agents may read.
-    handle, task_path = tempfile.mkstemp(prefix="rsi-task-", suffix=".json")
+    # The task holds its expected answer. Its file goes in the private directory, which agents are
+    # denied, so a copy left behind by a killed run is still out of their reach.
+    task_dir = Layout(cfg.name).private / "tmp"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    handle, task_path = tempfile.mkstemp(prefix="task-", suffix=".json", dir=task_dir)
     try:
         with os.fdopen(handle, "w") as fh:
             json.dump(task, fh)

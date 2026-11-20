@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .state import Layout, read_json, write_json_atomic
 
-ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# Ids name directories, so they start with a letter or digit: "." and ".." would alias other paths.
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class TaskError(Exception):
@@ -32,7 +33,7 @@ def load_tasks(path: Path) -> list[dict]:
             raise TaskError(f"{path}:{number}: must be a JSON object")
         task_id = obj.get("id")
         if not isinstance(task_id, str) or not ID_RE.match(task_id):
-            raise TaskError(f"{path}:{number}: id must match [A-Za-z0-9._-]+")
+            raise TaskError(f"{path}:{number}: id must match [A-Za-z0-9][A-Za-z0-9._-]*")
         if task_id in seen:
             raise TaskError(f"{path}:{number}: duplicate id {task_id}")
         seen.add(task_id)

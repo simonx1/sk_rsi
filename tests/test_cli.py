@@ -90,6 +90,19 @@ class RunTest(CliCase):
             self.assertIn("Pending tasks from live outcomes: 0", text)
         self.assertIn("[rsi] round 1: accepted s1", err)
 
+    def test_status_shows_heldout_after_every_round_when_it_was_scored(self):
+        project = self.make_toy(heldout="every_round")
+        self.rsi("run", "--no-promote", "--project", project)
+        _, out, _ = self.rsi("status", "--project", project)
+        self.assertIn("Held-out: 33.33 → 66.67 → 83.33", out)
+
+    def test_malformed_config_exits_2_from_run(self):
+        project = self.make_toy()
+        (project / ".rsi" / "config.toml").write_text("[project\n")
+        code, _, err = self.rsi("run", "--project", project)
+        self.assertEqual(code, 2)
+        self.assertIn("not valid TOML", err)
+
     def test_status_without_runs(self):
         project = self.make_toy()
         self.assertEqual(self.rsi("status", "--project", project)[:2], (0, "No runs yet.\n"))

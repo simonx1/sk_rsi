@@ -153,11 +153,17 @@ Set `RSI_HOME` to use a directory other than `~/.rsi`.
 
 - A candidate may only change `harness.editable` paths. `harness.frozen` and `.rsi/` are off limits,
   and a `run_task`, `check` or `ingest` command that the loop could rewrite is refused.
-- The default agents have file tools and no shell. They can read any file on the machine that is not
-  denied, so every agent call denies reading and editing the private directory, and the task file when
-  `tasks.file` puts it elsewhere. Keep expected answers nowhere else an agent could find them. A custom
-  `[agents]` command with shell access gives up this guarantee; `rsi validate` warns about it. These
-  are permission rules, not an operating-system sandbox.
+- The default agents run `claude` in restricted mode: file tools only, confined to their worktree and
+  the run's feedback, history and output folders, with no shell, no MCP servers and none of your own
+  settings. On top of that, every agent call denies the private directory and the task file, and makes
+  the feedback and history folders read-only. A custom `[agents]` command gives up these guarantees;
+  `rsi validate` warns about it. These are the CLI's permission rules, not an operating-system sandbox.
+- After the selector runs, anything it changed in the run branch's worktree is discarded. Before a
+  candidate is scored, its worktree is reset to exactly its commit, so a file git ignores cannot
+  influence the score.
+- `run_task` runs the candidate's code with your privileges, and the framework does not sandbox it. An
+  edit could in principle read the task file it is handed or tamper with the scoring. Keep the scoring
+  logic in frozen files, pass the harness only the task's input, and read the diff in the pull request.
 - A run stops before optimizing when too many rollouts fail to run at all.
 - Budgets cap rounds, candidates, parallel runs, timeouts and total active time.
 
@@ -165,7 +171,8 @@ Set `RSI_HOME` to use a directory other than `~/.rsi`.
 
 ```bash
 bin/test                          # everything, in under a minute
-RSI_SMOKE=1 bin/test -k smoke     # one round on the toy project with the real claude CLI (costs tokens)
+RSI_SMOKE=1 bin/test -k smoke     # with the real claude CLI (costs tokens): one round on the toy
+                                  # project, and a check that the default agent is confined
 ```
 
 `examples/toy/` is a tiny project used by the tests: a rules file as the harness, a deterministic

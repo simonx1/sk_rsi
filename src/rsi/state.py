@@ -144,20 +144,33 @@ class Lock:
     def __init__(self, path: Path):
         self.path = path
 
+    def _holder(self) -> int | None:
+        try:
+            return int(self.path.read_text().strip())
+        except (ValueError, FileNotFoundError):
+            return None
+
     def __enter__(self) -> "Lock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
-            try:
-                pid = int(self.path.read_text().strip())
-            except ValueError:
-                pid = None
-            if pid is not None and pid != os.getpid() and _alive(pid):
-                raise LockError(f"another rsi run (pid {pid}) holds {self.path}")
-        self.path.write_text(str(os.getpid()))
-        return self
+        mine = self.path.with_name(f"{self.path.name}.{os.getpid()}.tmp")
+        mine.write_text(str(os.getpid()))
+        try:
+            for _ in range(2):
+                try:
+                    os.link(mine, self.path)  # atomic: the lock appears complete, or the call fails
+                    return self
+                except FileExistsError:
+                    pid = self._holder()
+                    if pid is not None and pid != os.getpid() and _alive(pid):
+                        raise LockError(f"another rsi run (pid {pid}) holds {self.path}") from None
+                    self.path.unlink(missing_ok=True)  # left by a dead process, or unreadable
+            raise LockError(f"could not take {self.path}; another rsi run took it first")
+        finally:
+            mine.unlink(missing_ok=True)
 
     def __exit__(self, *exc: object) -> None:
-        self.path.unlink(missing_ok=True)
+        if self._holder() == os.getpid():
+            self.path.unlink(missing_ok=True)
 
 
 @dataclass

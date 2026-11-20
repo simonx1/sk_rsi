@@ -1,7 +1,9 @@
 import os
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime
+from types import SimpleNamespace
 
 from rsi import config, loop, workspace
 from rsi.state import Layout, LockError, RunState
@@ -15,6 +17,22 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(loop.planned_task_runs(10, 10, 2, 5, 3, every_round=True), 440)
         self.assertEqual(loop.planned_task_runs(6, 6, 1, 2, 3, every_round=False), 54)
         self.assertEqual(loop.planned_task_runs(6, 6, 1, 0, 3, every_round=False), 18)
+
+    def test_tolerance_is_compared_at_score_precision(self):
+        # 0.07 - 0.01 is 0.060000000000000005 in floating point; a candidate at 0.06 is exactly at the limit.
+        self.assertFalse(loop._below_tolerance(current=0.07, candidate=0.06, tolerance=0.01))
+        self.assertFalse(loop._below_tolerance(current=66.67, candidate=65.67, tolerance=1.0))
+        self.assertTrue(loop._below_tolerance(current=66.67, candidate=65.66, tolerance=1.0))
+        self.assertFalse(loop._below_tolerance(current=33.33, candidate=100.0, tolerance=0.0))
+
+    def test_the_running_step_counts_toward_the_wall_clock_limit(self):
+        def ctx(spent, running_for):
+            return SimpleNamespace(state=SimpleNamespace(active_seconds=spent),
+                                   cfg=SimpleNamespace(max_wall_clock_h=1.0),
+                                   step_began=time.monotonic() - running_for)
+        self.assertFalse(loop._out_of_time(ctx(spent=3590.0, running_for=2.0)))
+        self.assertTrue(loop._out_of_time(ctx(spent=3599.0, running_for=2.0)))
+        self.assertTrue(loop._out_of_time(ctx(spent=3601.0, running_for=0.0)))
 
 
 class ValidateTest(ToyCase):
@@ -51,6 +69,20 @@ class ValidateTest(ToyCase):
         only.write_text('{"id": "solo"}\n')
         v = loop.validate(self.project, replace(self.cfg, tasks_file=str(only)), self.layout)
         self.assertIn("both sets need at least one task", v.errors[0])
+
+    def test_an_empty_task_file_is_an_error(self):
+        blank = self.tmp / "blank.jsonl"
+        blank.write_text("\n\n")
+        v = loop.validate(self.project, replace(self.cfg, tasks_file=str(blank)), self.layout)
+        self.assertIn("both sets need at least one task", v.errors[0])
+
+    def test_a_path_with_glob_characters_cannot_be_denied_reliably(self):
+        odd = self.tmp / "bench[2026]" / "tasks.jsonl"
+        odd.parent.mkdir()
+        odd.write_text('{"id": "a"}\n{"id": "b"}\n')
+        v = loop.validate(self.project, replace(self.cfg, tasks_file=str(odd)), self.layout)
+        self.assertEqual(len(v.errors), 1)
+        self.assertIn("pattern characters", v.errors[0])
 
     def test_command_the_loop_could_rewrite(self):
         cfg = replace(self.cfg, editable=("**",), frozen=(), run_task="score.py {task_file} {checkout} {out}")
@@ -102,6 +134,20 @@ class StartTest(ToyCase):
         with self.assertRaises(loop.RunError) as caught:
             loop.run(project, rounds=0)
         self.assertEqual(str(caught.exception), ".rsi/config.toml is not committed on main; commit it there first")
+
+    def test_malformed_config_is_a_config_error(self):
+        project = self.make_toy()
+        (project / loop.CONFIG_PATH).write_text("[project\n")
+        with self.assertRaises(config.ConfigError):
+            loop.run(project, rounds=0)
+        (project / loop.CONFIG_PATH).write_text(self.config_text())
+        git(project, "checkout", "-q", "-b", "broken")
+        (project / loop.CONFIG_PATH).write_text(self.config_text().replace("rounds = 2", 'rounds = "two"'))
+        git(project, "commit", "-q", "-am", "break the config on a branch")
+        git(project, "checkout", "-q", "main")
+        with self.assertRaises(config.ConfigError) as caught:
+            loop.run(project, rounds=0, from_ref="broken")
+        self.assertIn("on broken: budget.rounds must be a whole number", str(caught.exception))
 
     def test_failing_check_refuses_to_start(self):
         project = self.make_toy(check="exit 1")

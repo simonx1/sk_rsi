@@ -9,12 +9,15 @@ from pathlib import Path
 from . import shell
 from .state import write_json_atomic
 
-# The default agent has file tools only. It may read any file on the machine that is not
-# denied, so {settings_file} denies every place held-out data is kept; without a shell it
-# cannot read around those rules.
+# The default agent is confined three ways:
+# - --restricted limits the file tools to the working directory and the --add-dir folders,
+#   removes the tools that run commands, and ignores the user's own settings;
+# - --tools fixes which tools exist, and --strict-mcp-config loads no MCP servers;
+# - {settings_file} denies the places held-out data is kept, and makes the shared
+#   feedback and history folders read-only.
 DEFAULT_COMMAND = (
-    "claude -p --permission-mode acceptEdits "
-    "--allowedTools Read Edit Write Grep Glob "
+    "claude -p --restricted --strict-mcp-config --permission-mode acceptEdits "
+    "--tools Read,Edit,Write,Grep,Glob "
     "--disallowedTools Bash "
     "--add-dir {feedback_dir} {history_dir} {out_dir} "
     "--settings {settings_file} < {prompt_file}"
@@ -31,19 +34,26 @@ class AgentResult:
     error: str | None
 
 
-def _write_settings(path: Path, deny: list[Path]) -> None:
-    """Deny reading and editing each path: a directory with everything under it, or one file.
+def _targets(path: Path) -> list[str]:
+    """Permission-rule targets for a path: a directory with everything under it, or one file."""
+    suffix = "" if path.is_file() else "/**"
+    # A path reached through a symlink has two names; cover both.
+    names = dict.fromkeys((path.expanduser().absolute(), path.resolve()))
+    return ["//" + str(name).lstrip("/") + suffix for name in names]
+
+
+def _write_settings(path: Path, deny: list[Path], readonly: list[Path]) -> None:
+    """Deny reading and editing `deny`, and editing `readonly`.
 
     claude applies Read and Edit rules to file access (Edit covers every editing tool, Read
     covers Grep and Glob); it ignores Write rules.
     """
     rules = []
     for denied in deny:
-        suffix = "" if denied.is_file() else "/**"
-        # A path reached through a symlink has two names; deny both.
-        for name in dict.fromkeys((denied.expanduser().absolute(), denied.resolve())):
-            target = "//" + str(name).lstrip("/") + suffix
+        for target in _targets(denied):
             rules += [f"Read({target})", f"Edit({target})"]
+    for kept in readonly:
+        rules += [f"Edit({target})" for target in _targets(kept)]
     write_json_atomic(path, {"permissions": {"deny": rules}})
 
 
@@ -58,14 +68,18 @@ def run_agent(
     deny: list[Path],
     timeout: float,
     env: dict[str, str] | None = None,
+    readonly: list[Path] | tuple[Path, ...] = (),
 ) -> AgentResult:
-    """Run one agent call. Its answer is whatever JSON file it leaves in out_dir."""
+    """Run one agent call. Its answer is whatever JSON file it leaves in out_dir.
+
+    `deny` paths may be neither read nor edited; `readonly` paths may be read only.
+    """
     for directory in (out_dir, feedback_dir, history_dir):
         directory.mkdir(parents=True, exist_ok=True)
     prompt_file = out_dir / "prompt.md"
     prompt_file.write_text(prompt)
     settings_file = out_dir / "settings.json"
-    _write_settings(settings_file, deny)
+    _write_settings(settings_file, deny, list(readonly))
     rendered = shell.render(command or DEFAULT_COMMAND, {
         "prompt_file": prompt_file,
         "out_dir": out_dir,
@@ -132,7 +146,8 @@ def read_screen(out_dir: Path, samples: list[str]) -> dict[str, tuple[bool, str]
         raise AgentOutputError("screen.json needs a 'screen' list")
     verdicts = {sample: (True, "not mentioned by the selector") for sample in samples}
     for row in rows:
-        if not isinstance(row, dict) or row.get("sample") not in verdicts:
+        sample = row.get("sample") if isinstance(row, dict) else None
+        if not isinstance(sample, str) or sample not in verdicts:
             continue
         if not isinstance(row.get("keep"), bool):
             raise AgentOutputError("each screen entry needs keep: true or false")

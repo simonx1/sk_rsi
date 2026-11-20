@@ -86,6 +86,16 @@ class LockTest(unittest.TestCase):
         with state.Lock(self.path):
             self.assertEqual(self.path.read_text(), str(os.getpid()))
 
+    def test_release_leaves_a_lock_that_is_no_longer_ours(self):
+        with state.Lock(self.path):
+            self.path.write_text(str(os.getppid()))  # another process took it over
+        self.assertEqual(self.path.read_text(), str(os.getppid()))
+
+    def test_no_temporary_files_are_left(self):
+        with state.Lock(self.path):
+            self.assertEqual([p.name for p in self.path.parent.iterdir()], ["lock"])
+        self.assertEqual(list(self.path.parent.iterdir()), [])
+
     def test_unreadable_lock_is_taken_over(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_text("not a pid")

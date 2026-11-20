@@ -26,14 +26,18 @@ if mode == "sleep":
     time.sleep(30)
 if mode == "none":
     sys.exit(0)
+if mode == "dir":
+    os.mkdir(os.path.join(out, "result.json"))
+    sys.exit(0)
 if mode == "raw":
     with open(os.path.join(out, "result.json"), "w") as fh:
         fh.write(task["raw"])
     sys.exit(0)
 names = ("RSI_TASK_ID", "RSI_ROLLOUT", "RSI_MODEL", "RSI_BENCHMARK")
-summary = " ".join(os.environ[n] for n in names)
+summary = sys.argv[1] if mode == "where" else " ".join(os.environ[n] for n in names)
+score = task["scores"][int(os.environ["RSI_ROLLOUT"]) - 1] if "scores" in task else task["score"]
 with open(os.path.join(out, "result.json"), "w") as fh:
-    json.dump({"score": task["score"], "summary": summary}, fh)
+    json.dump({"score": score, "summary": summary}, fh)
 print("ran", task["id"])
 '''
 
@@ -46,7 +50,8 @@ class EvaluateTest(unittest.TestCase):
         (self.checkout / "runner.py").write_text(RUNNER)
         self.results = self.tmp / "results dir"
         self.call_log = self.tmp / "calls.log"
-        self.enterContext(mock.patch.dict(os.environ, {"CALL_LOG": str(self.call_log)}))
+        self.home = self.tmp / "home"
+        self.enterContext(mock.patch.dict(os.environ, {"CALL_LOG": str(self.call_log), "RSI_HOME": str(self.home)}))
         self.cfg = minimal_config(
             run_task=f"{shlex.quote(sys.executable)} runner.py {{task_file}} {{out}}",
             rollouts=2,
@@ -63,6 +68,18 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(res.passing(0.5), {"a", "b"})
         self.assertEqual(res.passed_total(0.5), (4, 6))
         self.assertEqual(res.infra_failure_rate(), 0.0)
+
+    def test_task_score_is_the_mean_of_its_rollouts(self):
+        res = self.run_tasks([{"id": "a", "scores": [1, 0]}, {"id": "b", "scores": [0.5, 1]}])
+        self.assertEqual(res.task_scores(), {"a": 0.5, "b": 0.75})
+        self.assertEqual(res.score(), 62.5)
+        self.assertEqual(res.passed_total(0.5), (3, 4))
+
+    def test_task_file_is_kept_in_the_private_directory_and_removed(self):
+        res = self.run_tasks([{"id": "a", "score": 1, "mode": "where"}], replace(self.cfg, rollouts=1))
+        task_file = Path(res.rollouts[0].summary)
+        self.assertTrue(task_file.is_relative_to(self.home / "toy" / "private"), task_file)
+        self.assertFalse(task_file.exists())
 
     def test_score_has_two_decimals(self):
         res = self.run_tasks([{"id": "a", "score": 1}, {"id": "b", "score": 0}, {"id": "c", "score": 0}])
@@ -83,14 +100,17 @@ class EvaluateTest(unittest.TestCase):
             "neg": '{"score": -0.1}',
             "list": "[1]",
             "junk": "not json",
+            "huge": '{"score": 1' + "0" * 400 + "}",
         }
         task_list = [{"id": k, "mode": "raw", "raw": v} for k, v in raws.items()]
         task_list.append({"id": "missing", "mode": "none"})
+        task_list.append({"id": "folder", "mode": "dir"})
         res = self.run_tasks(task_list, replace(self.cfg, rollouts=1))
         self.assertEqual(res.score(), 0.0)
         self.assertEqual(res.infra_failure_rate(), 1.0)
         errors = {r.task_id: r.error for r in res.rollouts}
-        for name in ("nan", "bool", "text", "big", "neg"):
+        self.assertEqual(errors["folder"], "result.json could not be read")
+        for name in ("nan", "bool", "text", "big", "neg", "huge"):
             self.assertEqual(errors[name], "score must be a number from 0 to 1", name)
         self.assertEqual(errors["list"], "result.json is not an object")
         self.assertEqual(errors["junk"], "result.json is not JSON")
@@ -147,10 +167,10 @@ class EvaluateTest(unittest.TestCase):
     def test_evaluate_many_keeps_targets_apart(self):
         other = self.tmp / "other"
         other.mkdir()
-        (other / "runner.py").write_text(RUNNER)
+        (other / "runner.py").write_text(RUNNER.replace('{"score": score,', '{"score": 0,'))
         targets = {"x": (self.checkout, self.results / "x"), "y": (other, self.results / "y")}
         results = evaluator.evaluate_many(self.cfg, [{"id": "a", "score": 1}], targets, "bench-v1")
-        self.assertEqual({name: r.score() for name, r in results.items()}, {"x": 100.0, "y": 100.0})
+        self.assertEqual({name: r.score() for name, r in results.items()}, {"x": 100.0, "y": 0.0})
         self.assertTrue((self.results / "y" / "a" / "r2" / "rollout.json").is_file())
 
     def test_no_tasks_scores_zero(self):

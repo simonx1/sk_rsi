@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.dont_write_bytecode = True  # a rollout must not leave files in the checkout
@@ -12,6 +13,7 @@ sys.dont_write_bytecode = True  # a rollout must not leave files in the checkout
 
 def main(task_file, checkout, out):
     task = json.loads(Path(task_file).read_text())
+    time.sleep(float(os.environ.get("TOY_DELAY", "0")))  # lets a test catch the loop mid-run
     spec = importlib.util.spec_from_file_location("classify", Path(checkout) / "classify.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

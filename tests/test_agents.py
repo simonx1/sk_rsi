@@ -74,6 +74,23 @@ class RunAgentTest(unittest.TestCase):
             self.assertIn("{" + name + "}", agents.DEFAULT_COMMAND)
         self.assertIn("--disallowedTools Bash", agents.DEFAULT_COMMAND)
 
+    def test_default_command_confines_the_agent(self):
+        # --restricted confines the file tools to the working directory and the added directories and
+        # ignores user settings; --tools fixes which tools exist; no MCP servers are loaded.
+        for flag in ("--restricted", "--strict-mcp-config", "--tools Read,Edit,Write,Grep,Glob"):
+            self.assertIn(flag, agents.DEFAULT_COMMAND)
+
+    def test_read_only_paths_may_be_read_but_not_edited(self):
+        feedback = self.tmp / "feedback"
+        kwargs = dict(self.kwargs, readonly=[feedback])
+        agents.run_agent("selector", "true", "p", **kwargs)
+        deny = json.loads((self.out / "settings.json").read_text())["permissions"]["deny"]
+        private = str(self.tmp / "private").lstrip("/")
+        self.assertEqual(deny, [
+            f"Read(//{private}/**)", f"Edit(//{private}/**)",
+            "Edit(//" + str(feedback).lstrip("/") + "/**)",
+        ])
+
 
 class ManifestTest(unittest.TestCase):
     GOOD = {"root_cause": {"new": " premature completion "}, "what": " add a gate ",
@@ -136,6 +153,8 @@ class OutputFilesTest(unittest.TestCase):
             "s1": (False, "repeats a failed attempt"),
             "s2": (True, "not mentioned by the selector"),
         })
+        self.write("screen.json", json.dumps({"screen": [{"sample": [], "keep": False}, "junk"]}))
+        self.assertEqual(agents.read_screen(self.out, ["s1"]), {"s1": (True, "not mentioned by the selector")})
         self.write("screen.json", json.dumps({"screen": [{"sample": "s1", "keep": "no"}]}))
         self.assert_error(lambda: agents.read_screen(self.out, ["s1"]), "keep")
         self.write("screen.json", json.dumps({"screen": "all"}))

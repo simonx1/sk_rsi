@@ -91,11 +91,13 @@ class IngestTest(unittest.TestCase):
         self.assertEqual(result, {"evidence": 0, "tasks": 0, "skipped": []})
 
     def test_a_failing_command_raises_and_keeps_the_old_stamp(self):
+        self.feed_records(EVIDENCE)
+        self.run_ingest("2026-11-01T00:00:00Z")
         cfg = minimal_config(ingest="echo broken >&2; exit 5")
         with self.assertRaises(outcomes.OutcomeError) as caught:
             outcomes.ingest(cfg, self.layout, self.project)
         self.assertIn("exit code 5", str(caught.exception))
-        self.assertFalse(self.layout.ingest_stamp.exists())
+        self.assertEqual(self.layout.ingest_stamp.read_text().strip(), "2026-11-01T00:00:00Z")
 
     def test_skipped_lines_are_reported(self):
         self.feed.write_text("noise\n" + json.dumps(EVIDENCE) + "\n")
@@ -117,15 +119,18 @@ class EvidenceCursorTest(unittest.TestCase):
                 fh.write(json.dumps(record) + "\n")
 
     def test_each_record_is_new_once(self):
-        self.assertEqual(outcomes.new_evidence(self.layout, set()), ([], 0))
+        self.assertEqual(outcomes.new_evidence(self.layout, {"t01"}), ([], 0))
         self.add(EVIDENCE)
-        records, cursor = outcomes.new_evidence(self.layout, set())
+        records, cursor = outcomes.new_evidence(self.layout, {"t01"})
         self.assertEqual((records, cursor), ([EVIDENCE], 1))
-        self.assertEqual(outcomes.new_evidence(self.layout, set())[0], [EVIDENCE])
+        self.assertEqual(outcomes.new_evidence(self.layout, {"t01"})[0], [EVIDENCE])
         outcomes.mark_shown(self.layout, cursor)
-        self.assertEqual(outcomes.new_evidence(self.layout, set()), ([], 1))
+        self.assertEqual(outcomes.new_evidence(self.layout, {"t01"}), ([], 1))
 
-    def test_evidence_about_heldout_tasks_is_withheld(self):
-        self.add(EVIDENCE, HELDOUT_EVIDENCE)
-        records, cursor = outcomes.new_evidence(self.layout, {"t07"})
-        self.assertEqual((records, cursor), ([EVIDENCE], 2))
+    def test_only_evidence_about_an_evolve_task_or_no_task_is_shown(self):
+        # A task that is held-out, queued, or gone from the benchmark may be (or become) held-out.
+        unknown = {"kind": "evidence", "id": "e3", "summary": "About a task not in the benchmark", "task_id": "t99"}
+        general = {"kind": "evidence", "id": "e4", "summary": "About no task in particular"}
+        self.add(EVIDENCE, HELDOUT_EVIDENCE, unknown, general)
+        records, cursor = outcomes.new_evidence(self.layout, {"t01", "t02"})
+        self.assertEqual((records, cursor), ([EVIDENCE, general], 4))

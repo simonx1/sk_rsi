@@ -30,7 +30,7 @@ def _problem(obj: object) -> str | None:
     if obj["kind"] == "task":
         task = obj.get("task")
         if not isinstance(task, dict) or not isinstance(task.get("id"), str) or not tasks.ID_RE.match(task["id"]):
-            return "a task record needs a task object whose id matches [A-Za-z0-9._-]+"
+            return "a task record needs a task object whose id matches [A-Za-z0-9][A-Za-z0-9._-]*"
     elif "task_id" in obj and not isinstance(obj["task_id"], str):
         return "task_id must be text"
     return None
@@ -95,15 +95,17 @@ def ingest(cfg: Config, layout: Layout, project: Path, now: datetime | None = No
     return {"evidence": len(evidence), "tasks": added, "skipped": problems}
 
 
-def new_evidence(layout: Layout, heldout_ids: set[str]) -> tuple[list[dict], int]:
-    """Evidence not yet shown to a round, without records about held-out tasks.
+def new_evidence(layout: Layout, evolve_ids: set[str]) -> tuple[list[dict], int]:
+    """Evidence not yet shown to a round that an agent may see.
 
-    Returns the records and the cursor to hand to mark_shown once they are saved.
+    A record is shown when it names no task or names an evolve task. One that names any other
+    task is withheld: that task is held-out, or queued, or gone from the benchmark, and may be
+    or become held-out. Returns the records and the cursor to hand to mark_shown once saved.
     """
     lines = _lines(layout.evidence_file)
     shown = read_json(layout.evidence_cursor, {"shown": 0})["shown"]
     records = [json.loads(line) for line in lines[shown:]]
-    return [r for r in records if r.get("task_id") not in heldout_ids], len(lines)
+    return [r for r in records if "task_id" not in r or r["task_id"] in evolve_ids], len(lines)
 
 
 def mark_shown(layout: Layout, cursor: int) -> None:

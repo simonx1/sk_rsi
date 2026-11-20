@@ -81,21 +81,52 @@ def path_violations(paths: list[str], editable: Iterable[str], frozen: Iterable[
     return found
 
 
-def command_in_editable(command: str, repo: Path, editable: Iterable[str], frozen: Iterable[str]) -> bool:
-    """True when the command's first word is a repo file that a candidate could rewrite."""
+_INTERPRETER = re.compile(r"^(python[\d.]*|sh|bash|zsh|ruby|node|perl)$")
+_SEPARATORS = {"&&", "||", ";", "|", "&"}
+
+
+def _programs(command: str) -> list[str]:
+    """The files a command line runs: the first word of each simple command, and the script an interpreter is given."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
     try:
-        first = Path(shlex.split(command)[0])
-    except (ValueError, IndexError):
-        return False
-    if first.is_absolute():
+        words = list(lexer)
+    except ValueError:
+        return []
+    found: list[str] = []
+    simple: list[str] = []
+    for word in words + [";"]:
+        if word not in _SEPARATORS:
+            simple.append(word)
+            continue
+        while simple and (simple[0] == "env" or re.match(r"^\w+=", simple[0])):
+            simple.pop(0)
+        if simple:
+            found.append(simple[0])
+            if _INTERPRETER.match(Path(simple[0]).name):
+                for argument in simple[1:]:
+                    if argument in ("-c", "-m", "-e"):
+                        break  # inline code or a module follows, not a script file
+                    if not argument.startswith("-"):
+                        found.append(argument)
+                        break
+        simple = []
+    return found
+
+
+def command_in_editable(command: str, repo: Path, editable: Iterable[str], frozen: Iterable[str]) -> bool:
+    """True when the command runs a repo file that a candidate could rewrite."""
+    editable, frozen = list(editable), list(frozen)
+    root = repo.resolve()
+    for program in _programs(command):
         try:
-            first = first.resolve().relative_to(repo.resolve())
-        except ValueError:
-            return False
-    if not (repo / first).is_file():
-        return False
-    relative = first.as_posix()
-    return matches_any(relative, editable) and not matches_any(relative, frozen)
+            full = (root / program).resolve()  # an absolute program replaces root; ".." is normalised
+            relative = full.relative_to(root).as_posix()
+        except (ValueError, OSError):
+            continue
+        if full.is_file() and matches_any(relative, editable) and not matches_any(relative, frozen):
+            return True
+    return False
 
 
 # --- branches and worktrees -------------------------------------------------
@@ -143,12 +174,26 @@ def commit_all(worktree: Path, message: str, paths: list[str] | None = None) -> 
 
 def changed_files(repo: Path, base: str, head: str) -> list[str]:
     """Paths that differ between two commits. A rename counts as its old and its new path."""
-    out = git(repo, "diff", "--name-only", "--no-renames", base, head)
-    return sorted(line for line in out.splitlines() if line)
+    # -z gives the literal names; without it git quotes and escapes non-ASCII paths,
+    # and a quoted name would slip past the frozen patterns.
+    out = git(repo, "diff", "--name-only", "--no-renames", "-z", base, head)
+    return sorted(name for name in out.split("\0") if name)
 
 
 def diff_text(repo: Path, base: str, head: str) -> str:
     return git(repo, "diff", "--no-renames", base, head)
+
+
+def clean(worktree: Path) -> list[str]:
+    """Make the worktree exactly its commit: drop edits, untracked files and ignored files.
+
+    Returns what was discarded, as `git status` lines.
+    """
+    dirty = [line for line in git(worktree, "status", "--porcelain", "--ignored").splitlines() if line]
+    if dirty:
+        git(worktree, "reset", "--hard", "-q")
+        git(worktree, "clean", "-fdxq")
+    return dirty
 
 
 def fast_forward(worktree: Path, sha: str) -> None:

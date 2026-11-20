@@ -24,7 +24,7 @@ from typing import Callable
 
 from . import agents, config, evaluator, outcomes, prompts, shell, sim, tasks, workspace
 from . import promote as promote_mod
-from .state import Layout, Lock, RunLayout, RunState
+from .state import Layout, Lock, RunLayout, RunState, read_json
 
 CONFIG_PATH = ".rsi/config.toml"
 SIM_PATH = ".rsi/sim.json"
@@ -65,18 +65,24 @@ def validate(project: Path, cfg: config.Config, layout: Layout) -> Validation:
     path = layout.tasks_path(cfg.tasks_file)
     if path.resolve().is_relative_to(project.resolve()):
         errors.append(f"the task file {path} is inside the repo, where agents can read the expected answers")
+    loaded = True
     try:
         all_tasks = tasks.load_tasks(path)
     except tasks.TaskError as error:
         errors.append(str(error))
-        all_tasks = []
-    if all_tasks:
+        all_tasks, loaded = [], False
+    if loaded:
         split = tasks.load_split(layout, [t["id"] for t in all_tasks], cfg.heldout_fraction)
         evolve = [t for t in all_tasks if split[t["id"]] == "evolve"]
         heldout = [t for t in all_tasks if split[t["id"]] == "heldout"]
         if not evolve or not heldout:
             errors.append(
                 f"both sets need at least one task: there are {len(evolve)} evolve and {len(heldout)} held-out")
+    for denied in denied_paths(cfg, layout):
+        if any(ch in str(denied) for ch in "*?[]{}"):
+            errors.append(
+                f"{denied} contains pattern characters (* ? [ ] {{ }}), so agents cannot be denied it reliably; "
+                "use a path without them")
     for name in ("run_task", "check", "ingest"):
         command = getattr(cfg, name)
         if command and workspace.command_in_editable(command, project, cfg.editable, cfg.frozen):
@@ -122,6 +128,7 @@ class Ctx:
     evolve: list[dict]
     heldout: list[dict]
     lock: threading.Lock = field(default_factory=threading.Lock)
+    step_began: float = 0.0   # time.monotonic() when the running step started
 
     @property
     def main_wt(self) -> Path:
@@ -185,7 +192,7 @@ def _start(project: Path, live: config.Config, layout: Layout,
     try:
         cfg = config.parse(text)
     except config.ConfigError as error:
-        raise RunError(f"{CONFIG_PATH} on {base_ref}: {error}") from None
+        raise config.ConfigError(f"{CONFIG_PATH} on {base_ref}: {error}") from None
     if cfg.name != live.name:
         raise RunError(f"project.name is {cfg.name!r} on {base_ref} but {live.name!r} in the working copy")
     checked = validate(project, cfg, layout)
@@ -265,10 +272,7 @@ def run(project: Path, rounds: int | None = None, from_ref: str | None = None,
         promote: bool = True, new: bool = False, now: datetime | None = None) -> RunState:
     """Resume the project's unfinished run, or start one, and drive it to the end."""
     project = workspace.repo_root(project)
-    try:
-        live = config.load(project / CONFIG_PATH)
-    except config.ConfigError as error:
-        raise RunError(str(error)) from None
+    live = config.load(project / CONFIG_PATH)
     layout = Layout(live.name)
     with Lock(layout.lock_file):
         st = find_unfinished(layout)
@@ -289,7 +293,7 @@ def run(project: Path, rounds: int | None = None, from_ref: str | None = None,
 def _drive(ctx: Ctx, promote: bool) -> None:
     st = ctx.state
     while st.step != "done":
-        began = time.monotonic()
+        began = ctx.step_began = time.monotonic()
         _say(f"{st.run} round {st.round}: {st.step}")
         try:
             if st.step == "promote" and not promote:
@@ -335,7 +339,14 @@ def _stop_if_evaluator_is_broken(ctx: Ctx, result: evaluator.EvalResult, what: s
 
 
 def _out_of_time(ctx: Ctx) -> bool:
-    return ctx.state.active_seconds > ctx.cfg.max_wall_clock_h * 3600
+    """True when the active time, counting the step now running, is past the budget."""
+    spent = ctx.state.active_seconds + (time.monotonic() - ctx.step_began)
+    return spent > ctx.cfg.max_wall_clock_h * 3600
+
+
+def _below_tolerance(current: float, candidate: float, tolerance: float) -> bool:
+    """True when the candidate loses more than `tolerance` points. Scores have two decimals."""
+    return round(current - candidate, 2) > tolerance
 
 
 def _next_round(ctx: Ctx) -> None:
@@ -415,8 +426,16 @@ def _with_status(ctx: Ctx, status: str) -> list[dict]:
 def _call_agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str, str]) -> agents.AgentResult:
     command = ctx.cfg.proposer if role == "proposer" else ctx.cfg.selector
     env = {"RSI_ROUND": str(ctx.state.round), **env}
-    return agents.run_agent(role, command, prompt, cwd, out, ctx.rl.feedback, ctx.rl.history,
-                            denied_paths(ctx.cfg, ctx.layout), ctx.cfg.agent_timeout_s, env)
+    # Agents read the shared folders; only the framework writes them. The selector also only reads its worktree.
+    readonly = [ctx.rl.feedback, ctx.rl.history] + ([cwd] if role == "selector" else [])
+    result = agents.run_agent(role, command, prompt, cwd, out, ctx.rl.feedback, ctx.rl.history,
+                              denied_paths(ctx.cfg, ctx.layout), ctx.cfg.agent_timeout_s, env, readonly)
+    if role == "selector":
+        # A selector that can write (a custom agent command) must still leave the run branch as it was.
+        discarded = workspace.clean(cwd)
+        if discarded:
+            _say(f"warning: the selector changed {len(discarded)} path(s) in the run branch's worktree; discarded")
+    return result
 
 
 def _write_history(ctx: Ctx) -> None:
@@ -447,7 +466,10 @@ def _ingest(ctx: Ctx) -> None:
                      f"{len(got['skipped'])} lines skipped")
             except outcomes.OutcomeError as error:
                 _say(f"warning: {error}; the round goes on without new live outcomes")
-        records, cursor = outcomes.new_evidence(ctx.layout, set(st.heldout_ids))
+        # Only tasks the saved split puts on the evolve side: a queued or removed task may be held-out.
+        split = read_json(ctx.layout.split_file, {})
+        evolve_ids = {task_id for task_id, side in split.items() if side == "evolve"}
+        records, cursor = outcomes.new_evidence(ctx.layout, evolve_ids)
         evidence_file.write_text("".join(json.dumps(r) + "\n" for r in records))
         outcomes.mark_shown(ctx.layout, cursor)
     st.candidates = [
@@ -498,6 +520,7 @@ def _propose(ctx: Ctx) -> None:
         workspace.commit_all(worktree, f"rsi: {st.run} r{st.round} {c['sample']}: {_first_line(c['manifest']['what'])}")
         c["sha"] = workspace.rev_parse(worktree)
         c["files"] = workspace.changed_files(ctx.project, st.current_sha, c["sha"])
+        workspace.clean(worktree)  # an ignored file is not in the commit, so it must not be there to be scored
         c["status"] = "proposed"
     st.step = "screen"
 
@@ -558,6 +581,8 @@ def _screen(ctx: Ctx) -> None:
 def _evaluate(ctx: Ctx) -> None:
     st, threshold = ctx.state, ctx.cfg.pass_threshold
     kept = _with_status(ctx, "kept")
+    for c in kept:
+        workspace.clean(Path(c["worktree"]))  # the check may have left files; score exactly the commit
     targets = {c["sample"]: (Path(c["worktree"]), ctx.rl.feedback / c["sha"]) for c in kept}
     results = evaluator.evaluate_many(ctx.cfg, ctx.evolve, targets, st.benchmark) if targets else {}
     before = _evolve_now(ctx).passing(threshold)
@@ -594,7 +619,7 @@ def _select(ctx: Ctx) -> None:
                 accept, reason = None, f"selector failed: {error}"
         if accept:
             chosen = next(c for c in evaluated if c["sample"] == accept)
-            if chosen["score"] < st.scores[-1] - cfg.tolerance:
+            if _below_tolerance(st.scores[-1], chosen["score"], cfg.tolerance):
                 reason = (f"guard: {accept} scored {chosen['score']:.2f}, more than {cfg.tolerance:.2f} "
                           f"below the current {st.scores[-1]:.2f}; the selector's reason was: {reason}")
                 accept = None

@@ -45,6 +45,7 @@ class RepoTest(unittest.TestCase):
         self.repo = make_repo(self.tmp / "repo", {
             "rules.txt": "a => b\n",
             "frozen.py": "x = 1\n",
+            ".gitignore": "*.log\n",
             "bin/score": "#!/bin/sh\n",
             ".rsi/config.toml": "[project]\n",
         })
@@ -126,6 +127,30 @@ class RepoTest(unittest.TestCase):
             ["frozen.py: frozen"],
         )
 
+    def test_non_ascii_paths_are_reported_literally(self):
+        workspace.add_worktree(self.repo, self.wt, "cand/x", "main")
+        (self.wt / "frozen\u00e9.py").write_text("x = 2\n")
+        sha = workspace.commit_all(self.wt, "add a file with an accent in its name")
+        files = workspace.changed_files(self.repo, "main", sha)
+        self.assertEqual(files, ["frozen\u00e9.py"])
+        self.assertEqual(
+            workspace.path_violations(files, editable=["**"], frozen=["frozen\u00e9.py"]),
+            ["frozen\u00e9.py: frozen"],
+        )
+
+    def test_clean_discards_edits_untracked_and_ignored_files(self):
+        workspace.add_worktree(self.repo, self.wt, "cand/x", "main")
+        self.assertEqual(workspace.clean(self.wt), [])
+        (self.wt / "rules.txt").write_text("tampered\n")
+        (self.wt / "stray.txt").write_text("x")
+        (self.wt / "override.log").write_text("ignored by git, read by a scorer")
+        dirty = workspace.clean(self.wt)
+        self.assertEqual(len(dirty), 3)
+        self.assertEqual((self.wt / "rules.txt").read_text(), "a => b\n")
+        self.assertFalse((self.wt / "stray.txt").exists())
+        self.assertFalse((self.wt / "override.log").exists())
+        self.assertEqual(workspace.clean(self.wt), [])
+
     def test_fast_forward_and_is_merged(self):
         main_wt = self.tmp / "main-wt"
         workspace.add_worktree(self.repo, main_wt, "rsi/run1", "main")
@@ -146,6 +171,15 @@ class RepoTest(unittest.TestCase):
         self.assertFalse(check("bin/score {task_file} {out}", ["rules.txt"]))
         self.assertFalse(check("python3 score.py", ["**"]))
         self.assertTrue(check(f"{self.repo}/bin/score x", ["bin/**"]))
+        # the script an interpreter runs, a later command in a chain, and an unnormalised spelling
+        self.assertTrue(check("python3 bin/score x", ["bin/**"]))
+        self.assertTrue(check("env MODE=1 python3 -u bin/score x", ["bin/**"]))
+        self.assertTrue(check("true && bin/score x", ["bin/**"]))
+        self.assertTrue(check("true; bin/score x", ["bin/**"]))
+        self.assertTrue(check("bin/../bin/score x", ["bin/**"]))
+        # a file that is only an argument, or follows inline code, is not what runs
+        self.assertFalse(check("grep -q a bin/score", ["bin/**"]))
+        self.assertFalse(check("python3 -c 'print(1)' bin/score", ["bin/**"]))
         self.assertFalse(check("", ["**"]))
         self.assertFalse(check("echo 'unbalanced", ["**"]))
 
