@@ -39,8 +39,11 @@ def _write_settings(path: Path, deny: list[Path]) -> None:
     """
     rules = []
     for denied in deny:
-        target = "//" + str(denied.resolve()).lstrip("/") + ("" if denied.is_file() else "/**")
-        rules += [f"Read({target})", f"Edit({target})"]
+        suffix = "" if denied.is_file() else "/**"
+        # A path reached through a symlink has two names; deny both.
+        for name in dict.fromkeys((denied.expanduser().absolute(), denied.resolve())):
+            target = "//" + str(name).lstrip("/") + suffix
+            rules += [f"Read({target})", f"Edit({target})"]
     write_json_atomic(path, {"permissions": {"deny": rules}})
 
 

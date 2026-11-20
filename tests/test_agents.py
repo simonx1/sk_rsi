@@ -8,7 +8,8 @@ from rsi import agents
 
 class RunAgentTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        # Resolved, so a path here has one name; the symlink test builds its own second name.
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.cwd = self.tmp / "work tree"
         self.cwd.mkdir()
         self.out = self.tmp / "agent out"
@@ -47,6 +48,21 @@ class RunAgentTest(unittest.TestCase):
             f"Read(//{private}/**)", f"Edit(//{private}/**)",
             f"Read(//{single})", f"Edit(//{single})",
         ]}})
+
+    def test_a_symlinked_path_is_denied_under_both_names(self):
+        real = self.tmp / "real"
+        (real / "private").mkdir(parents=True)
+        link = self.tmp / "link"
+        link.symlink_to(real)
+        agents.run_agent("selector", "true", "p", **dict(self.kwargs, deny=[link / "private"]))
+        deny = json.loads((self.out / "settings.json").read_text())["permissions"]["deny"]
+        as_given = str(link.absolute() / "private").lstrip("/")
+        resolved = str((real / "private").resolve()).lstrip("/")
+        self.assertNotEqual(as_given, resolved)
+        self.assertEqual(deny, [
+            f"Read(//{as_given}/**)", f"Edit(//{as_given}/**)",
+            f"Read(//{resolved}/**)", f"Edit(//{resolved}/**)",
+        ])
 
     def test_failure_and_timeout(self):
         self.assertEqual(agents.run_agent("proposer", "exit 4", "p", **self.kwargs).error, "exit code 4")
