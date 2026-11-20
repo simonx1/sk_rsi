@@ -71,6 +71,11 @@ def ingest(cfg: Config, layout: Layout, project: Path, now: datetime | None = No
     if done.returncode != 0:
         raise OutcomeError(f"ingest failed with exit code {done.returncode}: {done.stderr.strip()[-500:]}")
     records, problems = parse_records(done.stdout)
+    tasks_path = layout.tasks_path(cfg.tasks_file)
+    try:
+        known = {t["id"] for t in tasks.load_tasks(tasks_path)} if tasks_path.is_file() else set()
+    except tasks.TaskError as error:
+        raise OutcomeError(f"ingest could not read the task file: {error}") from None
     seen = set(_lines(layout.seen_ids))
     fresh = []
     for record in records:
@@ -84,8 +89,6 @@ def ingest(cfg: Config, layout: Layout, project: Path, now: datetime | None = No
         with layout.evidence_file.open("a") as fh:
             for record in evidence:
                 fh.write(json.dumps(record) + "\n")
-    tasks_path = layout.tasks_path(cfg.tasks_file)
-    known = {t["id"] for t in tasks.load_tasks(tasks_path)} if tasks_path.is_file() else set()
     added = tasks.add_pending(layout, new_tasks, known)
     if fresh:
         with layout.seen_ids.open("a") as fh:

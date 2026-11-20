@@ -56,8 +56,12 @@ class Validation:
     heldout: list[dict]
 
 
-def validate(project: Path, cfg: config.Config, layout: Layout) -> Validation:
-    """Everything that can be checked without running a task."""
+def validate(project: Path, cfg: config.Config, layout: Layout, save_split: bool = True) -> Validation:
+    """Everything that can be checked without running a task.
+
+    Starting a run saves the side each new task is given, for good. `save_split=False` only
+    reports what the sides would be, so checking a setup does not commit to a split.
+    """
     errors: list[str] = []
     warnings: list[str] = []
     evolve: list[dict] = []
@@ -72,7 +76,11 @@ def validate(project: Path, cfg: config.Config, layout: Layout) -> Validation:
         errors.append(str(error))
         all_tasks, loaded = [], False
     if loaded:
-        split = tasks.load_split(layout, [t["id"] for t in all_tasks], cfg.heldout_fraction)
+        ids = [t["id"] for t in all_tasks]
+        if save_split:
+            split = tasks.load_split(layout, ids, cfg.heldout_fraction)
+        else:
+            split = tasks.assign_split(ids, read_json(layout.split_file, {}), cfg.heldout_fraction)
         evolve = [t for t in all_tasks if split[t["id"]] == "evolve"]
         heldout = [t for t in all_tasks if split[t["id"]] == "heldout"]
         if not evolve or not heldout:
@@ -86,7 +94,8 @@ def validate(project: Path, cfg: config.Config, layout: Layout) -> Validation:
     for name in ("run_task", "check", "ingest"):
         command = getattr(cfg, name)
         if command and workspace.command_in_editable(command, project, cfg.editable, cfg.frozen):
-            errors.append(f"commands.{name} runs a file the loop may edit; add it to harness.frozen")
+            errors.append(f"commands.{name} names a file the loop may edit; add it to harness.frozen, "
+                          "or call it from a frozen script")
     if cfg.proposer or cfg.selector:
         warnings.append(
             "a custom agent command is configured: held-out data is only kept from the default agents, "
@@ -441,7 +450,8 @@ def _call_agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dic
 def _write_history(ctx: Ctx) -> None:
     """Save every candidate of this round, accepted or not, where later rounds can read it."""
     st = ctx.state
-    keys = ("sample", "status", "reason", "sha", "files", "score", "fixed", "missed", "regressed", "passed", "total")
+    keys = ("sample", "status", "reason", "sha", "files", "score", "fixed", "missed", "regressed",
+            "passed", "total", "table")
     for c in st.candidates:
         folder = ctx.hist() / c["sample"]
         folder.mkdir(parents=True, exist_ok=True)
@@ -505,7 +515,11 @@ def _propose(ctx: Ctx) -> None:
             ctx.save()
 
     with ThreadPoolExecutor(max_workers=cfg.parallel) as pool:
-        list(pool.map(call, waiting))
+        try:
+            list(pool.map(call, waiting))
+        except (KeyboardInterrupt, SystemExit):
+            shell.kill_all()  # stop the agents now; their calls are made again on resume
+            raise
 
     for c in _with_status(ctx, "new"):
         if c["agent_error"]:
@@ -591,7 +605,7 @@ def _evaluate(ctx: Ctx) -> None:
         fixed, missed, regressed = sim.outcome(c["manifest"]["predicted"], before, result.passing(threshold))
         passed, total = result.passed_total(threshold)
         c.update(status="evaluated", score=result.score(), fixed=fixed, missed=missed,
-                 regressed=regressed, passed=passed, total=total)
+                 regressed=regressed, passed=passed, total=total, table=result.table(threshold))
     st.step = "select"
 
 

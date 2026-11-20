@@ -6,8 +6,17 @@ import os
 import shlex
 import signal
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+_guard = threading.Lock()
+_live: set[int] = set()     # process groups of commands now running
+_stopped: set[int] = set()  # those kill_all() stopped
+
+
+class Interrupted(Exception):
+    """The command was stopped by kill_all(), so it has no result."""
 
 
 @dataclass(frozen=True)
@@ -33,6 +42,21 @@ def _kill_group(proc: subprocess.Popen) -> None:
         pass
 
 
+def kill_all() -> None:
+    """Stop every running command. Each one's run() call then raises Interrupted.
+
+    Commands run in their own sessions, so Ctrl-C in the terminal does not reach them by itself.
+    """
+    with _guard:
+        pids = list(_live)
+        _stopped.update(pids)
+    for pid in pids:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def run(command: str, cwd: Path, timeout: float, env: dict[str, str] | None = None) -> ShellResult:
     """Run `command` through sh in its own process group, so a timeout stops everything it started."""
     full_env = dict(os.environ)
@@ -48,14 +72,25 @@ def run(command: str, cwd: Path, timeout: float, env: dict[str, str] | None = No
         errors="replace",
         start_new_session=True,
     )
+    with _guard:
+        _live.add(proc.pid)
     try:
-        out, err = proc.communicate(timeout=timeout)
-        return ShellResult(proc.returncode, out, err, False)
-    except subprocess.TimeoutExpired:
-        _kill_group(proc)
-        out, err = proc.communicate()
-        return ShellResult(-1, out or "", err or "", True)
-    except BaseException:
-        _kill_group(proc)
-        proc.wait()
-        raise
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            result = ShellResult(proc.returncode, out, err, False)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            out, err = proc.communicate()
+            result = ShellResult(-1, out or "", err or "", True)
+        except BaseException:
+            _kill_group(proc)
+            proc.wait()
+            raise
+    finally:
+        with _guard:
+            _live.discard(proc.pid)
+            stopped = proc.pid in _stopped
+            _stopped.discard(proc.pid)
+    if stopped:
+        raise Interrupted(command)
+    return result

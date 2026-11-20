@@ -38,8 +38,8 @@ Then:
    - It must not change `{checkout}`, post anything, or touch production.
    - Whatever it writes to `{out}` is shown to the proposer for evolve tasks. Put in what a person
      would need to diagnose a failure. For a held-out task nothing is shown.
-4. Add the scorer script and its tests to `harness.frozen`. `rsi validate` refuses a `run_task` that
-   the loop could rewrite.
+4. Add the scorer script and its tests to `harness.frozen`. `rsi validate` refuses a `run_task`,
+   `check` or `ingest` command that names any file the loop can edit.
 5. Help the user write the task file at the path `rsi init` printed. It stays **outside the repo**
    because it holds the expected answers. Each line is a JSON object with a unique `id`.
 6. Commit `.rsi/config.toml` and the scorer on the base branch.

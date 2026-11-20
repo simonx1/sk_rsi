@@ -157,6 +157,10 @@ def evaluate_many(
                     futures[pool.submit(run_rollout, cfg, task, k, checkout, out_dir, benchmark)] = name
         for future in as_completed(futures):
             collected[futures[future]].append(future.result())
+    except (KeyboardInterrupt, SystemExit):
+        shell.kill_all()  # the rollouts are in their own sessions; without this Ctrl-C waits for them
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
     except BaseException:
         pool.shutdown(wait=True, cancel_futures=True)
         raise

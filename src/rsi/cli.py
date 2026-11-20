@@ -56,6 +56,13 @@ pull_request = true
 """
 
 
+def _rounds(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be 0 or more")
+    return value
+
+
 def _project(args: argparse.Namespace) -> Path:
     return workspace.repo_root(Path(args.project or "."))
 
@@ -127,7 +134,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     project = _project(args)
     cfg, layout = _load(project)
-    checked = loop.validate(project, cfg, layout)
+    checked = loop.validate(project, cfg, layout, save_split=False)
     for warning in checked.warnings:
         print(f"warning: {warning}")
     for error in checked.errors:
@@ -145,7 +152,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 def _dry_run(project: Path, rounds: int | None) -> int:
     cfg, layout = _load(project)
-    checked = loop.validate(project, cfg, layout)
+    checked = loop.validate(project, cfg, layout, save_split=False)
     if checked.errors:
         for error in checked.errors:
             print(f"error: {error}")
@@ -229,6 +236,9 @@ def cmd_promote(args: argparse.Namespace) -> int:
             raise loop.RunError("there are no runs to promote")
     if st.status != "done":
         raise loop.RunError(f"run {st.run} is {st.status}; only a finished run can be promoted")
+    if st.promoted and st.promoted.get("url"):  # already opened; asking again must not lose it
+        print("\n".join(_promotion_lines(st.promoted)))
+        return 0
     try:
         memory = json.loads(workspace.show(project, st.branch, loop.SIM_PATH))
     except workspace.GitError:
@@ -272,7 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         sub = add(name, func, text)
         sub.add_argument("--dry-run", action="store_true", help="print how many task runs this would start, then exit")
-        sub.add_argument("--rounds", type=int, help="override budget.rounds for this run")
+        sub.add_argument("--rounds", type=_rounds, help="override budget.rounds for this run")
         sub.add_argument("--from", dest="from_ref", metavar="BRANCH", help="start from this branch instead of the base branch")
         sub.add_argument("--no-promote", action="store_true", help="do not push or open a pull request")
         sub.add_argument("--new", action="store_true", help="abandon the unfinished run and start fresh")
@@ -302,3 +312,6 @@ def main(argv: list[str] | None = None) -> int:
     except (loop.RunError, LockError, workspace.GitError, sim.SimError, outcomes.OutcomeError) as error:
         print(f"rsi: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("rsi: interrupted. A run in progress keeps its state; `rsi run` resumes it.", file=sys.stderr)
+        return 130

@@ -4,7 +4,7 @@ import json
 import shlex
 
 from rsi import cli, config, loop, sim
-from rsi.state import Layout
+from rsi.state import Layout, RunState
 from tests.helpers import git, make_repo
 from tests.toy import ToyCase
 
@@ -43,6 +43,16 @@ class ValidateTest(CliCase):
         self.assertIn("evolve tasks: 6, held-out tasks: 6", out)
         self.assertIn("check: passed", out)
         self.assertIn("warning: a custom agent command", out)
+
+    def test_validate_does_not_fix_the_split(self):
+        project = self.make_toy()
+        split_file = Layout("toy").split_file
+        split_file.unlink()
+        code, out, _ = self.rsi("validate", "--project", project)
+        self.assertEqual(code, 0)
+        self.assertIn("evolve tasks: 6, held-out tasks: 6", out)
+        self.rsi("run", "--dry-run", "--project", project)
+        self.assertFalse(split_file.exists())  # only a real run assigns sides for good
 
     def test_invalid_config_exits_2(self):
         project = self.make_toy()
@@ -123,6 +133,25 @@ class RunTest(CliCase):
         self.assertEqual(code, 0)
         self.assertIn("Pull request: not opened: the project has no git remote", out)
         self.assertEqual(loop.latest_run(Layout("toy")).promoted["skipped"], "the project has no git remote")
+
+    def test_promote_again_keeps_the_pull_request_already_opened(self):
+        project = self.make_toy()
+        self.rsi("run", "--no-promote", "--project", project)
+        layout = Layout("toy")
+        st = loop.latest_run(layout)
+        st.promoted = {"url": "https://example.test/toy/pull/1", "draft": False}
+        st.save(layout.run(st.run).state_file)
+        code, out, _ = self.rsi("promote", "--project", project)
+        self.assertEqual(code, 0)
+        self.assertIn("Pull request: https://example.test/toy/pull/1", out)
+        self.assertEqual(loop.latest_run(layout).promoted["url"], "https://example.test/toy/pull/1")
+
+    def test_negative_rounds_are_refused(self):
+        project = self.make_toy()
+        for command in ("run", "continue"):
+            with self.assertRaises(SystemExit) as caught:
+                self.rsi(command, "--dry-run", "--rounds", "-5", "--project", project)
+            self.assertEqual(caught.exception.code, 2)
 
     def test_promote_an_unknown_run(self):
         project = self.make_toy()

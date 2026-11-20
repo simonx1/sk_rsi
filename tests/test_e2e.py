@@ -112,6 +112,9 @@ class TwoRoundsTest(ToyCase):
             (loser["status"], loser["score"], loser["fixed"], loser["missed"], loser["regressed"]),
             ("evaluated", 66.67, ["t06"], [], ["t01"]),
         )
+        table = {row["task"]: row["passes"] for row in loser["table"]}
+        self.assertEqual(table, {"t01": False, "t02": True, "t03": True, "t04": False, "t05": True, "t06": True})
+        self.assertIsNone(history(st, 1, "s3/result.json")["table"])  # dropped before evaluation
         self.assertEqual(history(st, 1, "decision.json"), {"accept": "s1", "reason": "scripted"})
         self.assertEqual(history(st, 1, "s2/manifest.json")["predicted"], ["t06"])
         diff = (self.rl.history / "round-1" / "s2" / "diff.patch").read_text()
@@ -211,7 +214,8 @@ class GuardsTest(ToyCase):
         self.assertEqual(st.rounds_log[0]["reason"], "no candidate reached evaluation")
 
     def test_failing_check_drops_a_candidate(self):
-        check = "grep -q invoice rules.txt"
+        # Inline code, because a command may not name a file the loop edits.
+        check = f"{sys.executable} -c \"import sys; sys.exit(0 if 'invoice' in open('rules.txt').read() else 1)\""
         script = self.tmp / "breaks_check.json"
         script.write_text(json.dumps({
             "proposer": {"0": {"s1": {

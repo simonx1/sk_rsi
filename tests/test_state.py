@@ -100,7 +100,8 @@ class LockTest(unittest.TestCase):
         self.path.parent.mkdir(parents=True)
         self.path.write_text("not a pid")
         with state.Lock(self.path):
-            pass
+            self.assertEqual(self.path.read_text(), str(os.getpid()))
+        self.assertFalse(self.path.exists())
 
 
 class RunStateTest(unittest.TestCase):

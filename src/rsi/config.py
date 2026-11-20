@@ -7,7 +7,8 @@ import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# Names become directory names, so they start with a letter or digit: ".." would leave the state directory.
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class ConfigError(Exception):
@@ -114,8 +115,12 @@ def _coerce(where: str, raw: object, kind: type) -> object:
 
 def _check_ranges(cfg: Config) -> None:
     rules = (
-        (NAME_RE.match(cfg.name), "project.name may only contain letters, digits, '.', '_' and '-'"),
-        (NAME_RE.match(cfg.benchmark), "setting.benchmark may only contain letters, digits, '.', '_' and '-'"),
+        (NAME_RE.match(cfg.name),
+         "project.name must start with a letter or digit and contain only letters, digits, '.', '_' and '-'"),
+        (NAME_RE.match(cfg.benchmark),
+         "setting.benchmark must start with a letter or digit and contain only letters, digits, '.', '_' and '-'"),
+        (cfg.tasks_file is None or cfg.tasks_file.startswith(("/", "~")),
+         "tasks.file must be an absolute path or start with ~; a relative path would depend on where rsi is run"),
         (len(cfg.editable) > 0, "harness.editable must list at least one pattern"),
         (0 < cfg.heldout_fraction < 1, "tasks.heldout_fraction must be between 0 and 1, exclusive"),
         (cfg.rollouts >= 1, "tasks.rollouts must be at least 1"),

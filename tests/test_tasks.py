@@ -113,6 +113,13 @@ class StateFilesTest(unittest.TestCase):
         self.assertEqual(tasks.pending_count(self.layout), 0)
         self.assertEqual(tasks.benchmark_label("replay", self.layout), "replay-v2")
 
+    def test_fold_into_a_task_file_without_a_final_newline(self):
+        self.tasks_path.parent.mkdir(parents=True, exist_ok=True)
+        self.tasks_path.write_text('{"id": "a"}')
+        tasks.add_pending(self.layout, [{"id": "p1"}], set())
+        self.assertEqual(tasks.fold_pending(self.layout, self.tasks_path), 1)
+        self.assertEqual([t["id"] for t in tasks.load_tasks(self.tasks_path)], ["a", "p1"])
+
     def test_fold_with_nothing_pending_changes_nothing(self):
         write_tasks(self.tasks_path, ["a"])
         self.assertEqual(tasks.fold_pending(self.layout, self.tasks_path), 0)

@@ -151,8 +151,9 @@ Set `RSI_HOME` to use a directory other than `~/.rsi`.
 
 ## Guards
 
-- A candidate may only change `harness.editable` paths. `harness.frozen` and `.rsi/` are off limits,
-  and a `run_task`, `check` or `ingest` command that the loop could rewrite is refused.
+- A candidate may only change `harness.editable` paths. `harness.frozen` and `.rsi/` are off limits.
+  A `run_task`, `check` or `ingest` command may not name any file the loop can edit: freeze the file,
+  or call it from a frozen script.
 - The default agents run `claude` in restricted mode: file tools only, confined to their worktree and
   the run's feedback, history and output folders, with no shell, no MCP servers and none of your own
   settings. On top of that, every agent call denies the private directory and the task file, and makes

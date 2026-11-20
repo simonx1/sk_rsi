@@ -81,46 +81,37 @@ def path_violations(paths: list[str], editable: Iterable[str], frozen: Iterable[
     return found
 
 
-_INTERPRETER = re.compile(r"^(python[\d.]*|sh|bash|zsh|ruby|node|perl)$")
-_SEPARATORS = {"&&", "||", ";", "|", "&"}
-
-
-def _programs(command: str) -> list[str]:
-    """The files a command line runs: the first word of each simple command, and the script an interpreter is given."""
+def _named_words(command: str) -> list[str]:
+    """Every word of a command line, plus the words inside quoted arguments and after `NAME=`."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         words = list(lexer)
     except ValueError:
-        return []
-    found: list[str] = []
-    simple: list[str] = []
-    for word in words + [";"]:
-        if word not in _SEPARATORS:
-            simple.append(word)
-            continue
-        while simple and (simple[0] == "env" or re.match(r"^\w+=", simple[0])):
-            simple.pop(0)
-        if simple:
-            found.append(simple[0])
-            if _INTERPRETER.match(Path(simple[0]).name):
-                for argument in simple[1:]:
-                    if argument in ("-c", "-m", "-e"):
-                        break  # inline code or a module follows, not a script file
-                    if not argument.startswith("-"):
-                        found.append(argument)
-                        break
-        simple = []
+        words = command.split()
+    found = list(words)
+    for word in words:
+        if any(ch.isspace() for ch in word):  # e.g. the argument of `bash -c '...'`
+            try:
+                found += shlex.split(word)
+            except ValueError:
+                found += word.split()
+        if "=" in word:
+            found.append(word.split("=", 1)[1])
     return found
 
 
 def command_in_editable(command: str, repo: Path, editable: Iterable[str], frozen: Iterable[str]) -> bool:
-    """True when the command runs a repo file that a candidate could rewrite."""
+    """True when the command names a repo file that a candidate could rewrite.
+
+    It fails closed: the file counts wherever it appears, because working out which words a
+    shell command really executes cannot be done reliably.
+    """
     editable, frozen = list(editable), list(frozen)
     root = repo.resolve()
-    for program in _programs(command):
+    for word in _named_words(command):
         try:
-            full = (root / program).resolve()  # an absolute program replaces root; ".." is normalised
+            full = (root / word).resolve()  # an absolute word replaces root; ".." is normalised
             relative = full.relative_to(root).as_posix()
         except (ValueError, OSError):
             continue

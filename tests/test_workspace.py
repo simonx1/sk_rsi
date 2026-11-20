@@ -171,15 +171,21 @@ class RepoTest(unittest.TestCase):
         self.assertFalse(check("bin/score {task_file} {out}", ["rules.txt"]))
         self.assertFalse(check("python3 score.py", ["**"]))
         self.assertTrue(check(f"{self.repo}/bin/score x", ["bin/**"]))
-        # the script an interpreter runs, a later command in a chain, and an unnormalised spelling
-        self.assertTrue(check("python3 bin/score x", ["bin/**"]))
-        self.assertTrue(check("env MODE=1 python3 -u bin/score x", ["bin/**"]))
-        self.assertTrue(check("true && bin/score x", ["bin/**"]))
-        self.assertTrue(check("true; bin/score x", ["bin/**"]))
-        self.assertTrue(check("bin/../bin/score x", ["bin/**"]))
-        # a file that is only an argument, or follows inline code, is not what runs
-        self.assertFalse(check("grep -q a bin/score", ["bin/**"]))
-        self.assertFalse(check("python3 -c 'print(1)' bin/score", ["bin/**"]))
+        # Fail closed: an editable file named anywhere in the command counts, whatever runs it.
+        for command in (
+            "python3 bin/score x",
+            "env MODE=1 python3 -u bin/score x",
+            "timeout 60 bin/score x",
+            "true && bin/score x",
+            "true; bin/score x",
+            "bin/../bin/score x",
+            "bash -c 'bin/score x'",
+            "SCORER=bin/score run-it",
+            "grep -q a bin/score",
+        ):
+            self.assertTrue(check(command, ["bin/**"]), command)
+            self.assertFalse(check(command, ["bin/**"], ["bin/score"]), command)
+        self.assertFalse(check("ls bin", ["bin/**"]))  # a directory is not a file the loop edits
         self.assertFalse(check("", ["**"]))
         self.assertFalse(check("echo 'unbalanced", ["**"]))
 

@@ -87,7 +87,9 @@ class ValidateTest(ToyCase):
     def test_command_the_loop_could_rewrite(self):
         cfg = replace(self.cfg, editable=("**",), frozen=(), run_task="score.py {task_file} {checkout} {out}")
         v = loop.validate(self.project, cfg, self.layout)
-        self.assertEqual(v.errors, ["commands.run_task runs a file the loop may edit; add it to harness.frozen"])
+        self.assertEqual(v.errors, [
+            "commands.run_task names a file the loop may edit; add it to harness.frozen, "
+            "or call it from a frozen script"])
 
     def test_agents_are_denied_the_private_directory_and_a_task_file_kept_elsewhere(self):
         self.assertEqual(loop.denied_paths(self.cfg, self.layout), [self.layout.private])

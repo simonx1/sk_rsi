@@ -1,7 +1,10 @@
 import os
 import shlex
+import signal
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -120,6 +123,19 @@ class EvaluateTest(unittest.TestCase):
         res = self.run_tasks([{"id": "slow", "mode": "sleep"}], replace(self.cfg, rollouts=1, task_timeout_s=1))
         self.assertEqual(res.rollouts[0].error, "timeout after 1s")
         self.assertEqual(res.rollouts[0].score, 0.0)
+
+    def test_an_interrupt_stops_running_commands_and_records_nothing(self):
+        timer = threading.Timer(1.0, lambda: os.kill(os.getpid(), signal.SIGINT))  # what Ctrl-C sends
+        timer.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_tasks([{"id": "slow1", "mode": "sleep"}, {"id": "slow2", "mode": "sleep"}],
+                               replace(self.cfg, rollouts=1))
+        finally:
+            timer.cancel()
+        self.assertLess(time.monotonic() - started, 10)  # the commands would otherwise run for 20s
+        self.assertEqual(list(self.results.rglob("rollout.json")), [])
 
     def test_finished_rollouts_are_not_run_again(self):
         task_list = [{"id": "a", "score": 1}]

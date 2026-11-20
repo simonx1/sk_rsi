@@ -117,7 +117,10 @@ def fold_pending(layout: Layout, tasks_path: Path) -> int:
     have = {t["id"] for t in current}
     fresh = [t for t in pending if t["id"] not in have]
     if fresh:
+        text = tasks_path.read_text()
         with tasks_path.open("a") as handle:
+            if text and not text.endswith("\n"):
+                handle.write("\n")  # or the first new task would join the last line
             for task in fresh:
                 handle.write(json.dumps(task) + "\n")
         write_json_atomic(layout.benchmark_file, {"version": benchmark_version(layout) + 1})

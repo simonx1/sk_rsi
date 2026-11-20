@@ -99,6 +99,13 @@ class IngestTest(unittest.TestCase):
         self.assertIn("exit code 5", str(caught.exception))
         self.assertEqual(self.layout.ingest_stamp.read_text().strip(), "2026-11-01T00:00:00Z")
 
+    def test_an_unreadable_task_file_fails_ingest_before_anything_is_stored(self):
+        self.layout.tasks_path(None).write_text("not json\n")
+        self.feed_records(EVIDENCE, TASK)
+        with self.assertRaises(outcomes.OutcomeError):
+            self.run_ingest()
+        self.assertFalse(self.layout.evidence_file.exists())
+
     def test_skipped_lines_are_reported(self):
         self.feed.write_text("noise\n" + json.dumps(EVIDENCE) + "\n")
         result = self.run_ingest()

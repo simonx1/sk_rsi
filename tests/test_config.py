@@ -105,6 +105,14 @@ pull_request = false
         self.assert_error(MINIMAL + "\n[budget]\ncandidates = 0\n", "budget.candidates")
         self.assert_error(MINIMAL.replace('editable = ["rules.txt"]', "editable = []"), "harness.editable")
         self.assert_error(MINIMAL.replace('name = "toy"', 'name = "my toy"'), "project.name")
+        for unsafe in ("..", ".", ".hidden", "-x"):
+            self.assert_error(MINIMAL.replace('name = "toy"', f'name = "{unsafe}"'), "project.name")
+        self.assert_error(MINIMAL.replace('benchmark = "toy"', 'benchmark = ".."'), "setting.benchmark")
+
+    def test_task_file_path_must_not_depend_on_the_current_directory(self):
+        self.assert_error(MINIMAL + '\n[tasks]\nfile = "bench/tasks.jsonl"\n', "tasks.file must be an absolute path")
+        self.assert_error(MINIMAL + '\n[tasks]\nfile = "../tasks.jsonl"\n', "tasks.file must be an absolute path")
+        self.assertEqual(config.parse(MINIMAL + '\n[tasks]\nfile = "/bench/t.jsonl"\n').tasks_file, "/bench/t.jsonl")
 
     def test_invalid_toml(self):
         self.assert_error("[project\nname=", "not valid TOML")
