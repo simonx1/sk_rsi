@@ -1,0 +1,13 @@
+#!/bin/sh
+# Makes the /rsi skill available to Claude Code by linking skill/ into ~/.claude/skills/rsi.
+set -eu
+root="$(cd "$(dirname "$0")/.." && pwd)"
+target="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}/rsi"
+mkdir -p "$(dirname "$target")"
+if [ -e "$target" ] && [ ! -L "$target" ]; then
+  echo "install-skill: $target exists and is not a symlink; move it away first" >&2
+  exit 1
+fi
+ln -sfn "$root/skill" "$target"
+echo "Linked $target -> $root/skill"
+echo "Restart Claude Code to load the skill."
