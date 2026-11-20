@@ -14,7 +14,7 @@ class RunAgentTest(unittest.TestCase):
         self.out = self.tmp / "agent out"
         self.kwargs = dict(
             cwd=self.cwd, out_dir=self.out, feedback_dir=self.tmp / "feedback",
-            history_dir=self.tmp / "history", private_dir=self.tmp / "private", timeout=20,
+            history_dir=self.tmp / "history", deny=[self.tmp / "private"], timeout=20,
         )
 
     def test_command_receives_prompt_paths_and_environment(self):
@@ -33,12 +33,19 @@ class RunAgentTest(unittest.TestCase):
         self.assertEqual(Path((self.out / "cwd.txt").read_text().strip()).resolve(), self.cwd.resolve())
         self.assertIn("talking", (self.out / "agent.log").read_text())
 
-    def test_settings_deny_the_private_directory(self):
-        agents.run_agent("selector", "true", "p", **self.kwargs)
+    def test_settings_deny_reading_and_editing_every_given_path(self):
+        task_file = self.tmp / "bench" / "tasks.jsonl"
+        task_file.parent.mkdir()
+        task_file.write_text("")
+        kwargs = dict(self.kwargs, deny=[self.tmp / "private", task_file])
+        agents.run_agent("selector", "true", "p", **kwargs)
         settings = json.loads((self.out / "settings.json").read_text())
         private = str((self.tmp / "private").resolve()).lstrip("/")
+        single = str(task_file.resolve()).lstrip("/")
+        # claude applies Read and Edit deny rules to files; it ignores Write rules and warns about them.
         self.assertEqual(settings, {"permissions": {"deny": [
-            f"Read(//{private}/**)", f"Edit(//{private}/**)", f"Write(//{private}/**)",
+            f"Read(//{private}/**)", f"Edit(//{private}/**)",
+            f"Read(//{single})", f"Edit(//{single})",
         ]}})
 
     def test_failure_and_timeout(self):

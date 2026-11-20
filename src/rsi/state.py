@@ -65,7 +65,8 @@ class Layout:
 
     @property
     def outcomes(self) -> Path:
-        return self.root / "outcomes"
+        # Under private/: stored evidence can be about held-out tasks.
+        return self.private / "outcomes"
 
     @property
     def evidence_file(self) -> Path:

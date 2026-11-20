@@ -141,6 +141,14 @@ class TwoRoundsTest(ToyCase):
         for root in (self.rl.agents, self.rl.feedback, self.rl.history):
             self.assertFalse(root.is_relative_to(Layout("toy").private))
 
+    def test_every_agent_call_denies_the_private_directory(self):
+        private = str(Layout("toy").private.resolve()).lstrip("/")
+        settings = sorted(self.rl.agents.rglob("settings.json"))
+        self.assertEqual(len(settings), 10)  # 3 proposers + screen + select, in each of 2 rounds
+        for path in settings:
+            deny = json.loads(path.read_text())["permissions"]["deny"]
+            self.assertEqual(deny, [f"Read(//{private}/**)", f"Edit(//{private}/**)"], str(path))
+
 
 class GuardsTest(ToyCase):
     def test_tolerance_guard_overrides_the_selector(self):
@@ -326,6 +334,10 @@ class OptionsTest(ToyCase):
         self.assertEqual(len((rl.history / "round-0" / "evidence.jsonl").read_text().splitlines()), 1)
         self.assertEqual(tasks.pending_count(Layout("toy")), 1)
         self.assertEqual(len(st.evolve_ids) + len(st.heldout_ids), 12)
+        # The stored evidence includes the held-out note, so it must sit where agents are denied.
+        stored = Layout("toy").evidence_file
+        self.assertIn("SECRET-HELDOUT-NOTE", stored.read_text())
+        self.assertTrue(stored.is_relative_to(Layout("toy").private))
 
     def test_failing_ingest_does_not_stop_the_round(self):
         project = self.make_toy(ingest="exit 9", rounds=1)

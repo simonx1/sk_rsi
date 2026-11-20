@@ -88,6 +88,15 @@ def validate(project: Path, cfg: config.Config, layout: Layout) -> Validation:
     return Validation(errors, warnings, evolve, heldout)
 
 
+def denied_paths(cfg: config.Config, layout: Layout) -> list[Path]:
+    """Everything an agent must not read: the private directory, and the task file when it is kept elsewhere."""
+    denied = [layout.private]
+    tasks_path = layout.tasks_path(cfg.tasks_file)
+    if not tasks_path.resolve().is_relative_to(layout.private.resolve()):
+        denied.append(tasks_path)
+    return denied
+
+
 def run_check(cfg: config.Config, cwd: Path) -> str | None:
     """Run the project's fast check. Returns None when it passes, otherwise what went wrong."""
     if not cfg.check:
@@ -407,7 +416,7 @@ def _call_agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dic
     command = ctx.cfg.proposer if role == "proposer" else ctx.cfg.selector
     env = {"RSI_ROUND": str(ctx.state.round), **env}
     return agents.run_agent(role, command, prompt, cwd, out, ctx.rl.feedback, ctx.rl.history,
-                            ctx.layout.private, ctx.cfg.agent_timeout_s, env)
+                            denied_paths(ctx.cfg, ctx.layout), ctx.cfg.agent_timeout_s, env)
 
 
 def _write_history(ctx: Ctx) -> None:

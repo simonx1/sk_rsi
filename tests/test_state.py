@@ -25,7 +25,8 @@ class LayoutTest(unittest.TestCase):
         self.assertEqual(layout.root, self.tmp / "toy")
         self.assertEqual(layout.private, self.tmp / "toy" / "private")
         self.assertEqual(layout.split_file, self.tmp / "toy" / "private" / "split.json")
-        self.assertEqual(layout.evidence_file, self.tmp / "toy" / "outcomes" / "evidence.jsonl")
+        self.assertEqual(layout.evidence_file, self.tmp / "toy" / "private" / "outcomes" / "evidence.jsonl")
+        self.assertTrue(layout.outcomes.is_relative_to(layout.private))
         self.assertEqual(layout.lock_file, self.tmp / "toy" / "lock")
 
     def test_tasks_path_default_and_override(self):

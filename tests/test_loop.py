@@ -57,6 +57,12 @@ class ValidateTest(ToyCase):
         v = loop.validate(self.project, cfg, self.layout)
         self.assertEqual(v.errors, ["commands.run_task runs a file the loop may edit; add it to harness.frozen"])
 
+    def test_agents_are_denied_the_private_directory_and_a_task_file_kept_elsewhere(self):
+        self.assertEqual(loop.denied_paths(self.cfg, self.layout), [self.layout.private])
+        elsewhere = self.tmp / "bench" / "tasks.jsonl"
+        cfg = replace(self.cfg, tasks_file=str(elsewhere))
+        self.assertEqual(loop.denied_paths(cfg, self.layout), [self.layout.private, elsewhere])
+
     def test_run_check(self):
         self.assertIsNone(loop.run_check(self.cfg, self.project))
         self.assertIsNone(loop.run_check(replace(self.cfg, check=None), self.project))

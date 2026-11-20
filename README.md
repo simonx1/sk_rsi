@@ -143,7 +143,7 @@ which raises the benchmark version (`replay-v1` to `replay-v2`).
 |---|---|
 | `.rsi/config.toml` in the project | The config |
 | `.rsi/sim.json`, `.rsi/log.md` on the run branch | The memory and a per-round log of evolve scores |
-| `~/.rsi/<name>/private/` | Tasks, the split, run state, held-out results. Never given to agents |
+| `~/.rsi/<name>/private/` | Tasks, the split, run state, held-out results, stored live outcomes. Denied to agents |
 | `~/.rsi/<name>/runs/<run>/` | Evolve results, each round's candidates, agent prompts and logs |
 | `~/.rsi/<name>/worktrees/<run>/` | Git worktrees. Your working copy is never touched |
 
@@ -153,9 +153,11 @@ Set `RSI_HOME` to use a directory other than `~/.rsi`.
 
 - A candidate may only change `harness.editable` paths. `harness.frozen` and `.rsi/` are off limits,
   and a `run_task`, `check` or `ingest` command that the loop could rewrite is refused.
-- The default agents have file tools and no shell, plus a rule denying the private directory. A custom
-  `[agents]` command with shell access gives up that guarantee; `rsi validate` warns about it. This is
-  a permission rule, not an operating-system sandbox.
+- The default agents have file tools and no shell. They can read any file on the machine that is not
+  denied, so every agent call denies reading and editing the private directory, and the task file when
+  `tasks.file` puts it elsewhere. Keep expected answers nowhere else an agent could find them. A custom
+  `[agents]` command with shell access gives up this guarantee; `rsi validate` warns about it. These
+  are permission rules, not an operating-system sandbox.
 - A run stops before optimizing when too many rollouts fail to run at all.
 - Budgets cap rounds, candidates, parallel runs, timeouts and total active time.
 

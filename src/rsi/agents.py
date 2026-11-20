@@ -9,8 +9,9 @@ from pathlib import Path
 from . import shell
 from .state import write_json_atomic
 
-# The default agent has file tools only. Without a shell it cannot read around the deny
-# rules in {settings_file}, which is what keeps held-out data away from it.
+# The default agent has file tools only. It may read any file on the machine that is not
+# denied, so {settings_file} denies every place held-out data is kept; without a shell it
+# cannot read around those rules.
 DEFAULT_COMMAND = (
     "claude -p --permission-mode acceptEdits "
     "--allowedTools Read Edit Write Grep Glob "
@@ -30,10 +31,17 @@ class AgentResult:
     error: str | None
 
 
-def _write_settings(path: Path, private_dir: Path) -> None:
-    root = str(private_dir.resolve()).lstrip("/")
-    deny = [f"{tool}(//{root}/**)" for tool in ("Read", "Edit", "Write")]
-    write_json_atomic(path, {"permissions": {"deny": deny}})
+def _write_settings(path: Path, deny: list[Path]) -> None:
+    """Deny reading and editing each path: a directory with everything under it, or one file.
+
+    claude applies Read and Edit rules to file access (Edit covers every editing tool, Read
+    covers Grep and Glob); it ignores Write rules.
+    """
+    rules = []
+    for denied in deny:
+        target = "//" + str(denied.resolve()).lstrip("/") + ("" if denied.is_file() else "/**")
+        rules += [f"Read({target})", f"Edit({target})"]
+    write_json_atomic(path, {"permissions": {"deny": rules}})
 
 
 def run_agent(
@@ -44,7 +52,7 @@ def run_agent(
     out_dir: Path,
     feedback_dir: Path,
     history_dir: Path,
-    private_dir: Path,
+    deny: list[Path],
     timeout: float,
     env: dict[str, str] | None = None,
 ) -> AgentResult:
@@ -54,7 +62,7 @@ def run_agent(
     prompt_file = out_dir / "prompt.md"
     prompt_file.write_text(prompt)
     settings_file = out_dir / "settings.json"
-    _write_settings(settings_file, private_dir)
+    _write_settings(settings_file, deny)
     rendered = shell.render(command or DEFAULT_COMMAND, {
         "prompt_file": prompt_file,
         "out_dir": out_dir,
