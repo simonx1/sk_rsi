@@ -75,6 +75,16 @@ class ValidateTest(ToyCase):
         missing.write_text("Never touch the deploy task.\n")
         self.assertEqual(loop.validate(self.project, replace(self.cfg, agent_notes=str(missing)), self.layout).errors, [])
 
+    def test_notes_file_the_loop_may_edit_is_refused(self):
+        editable = self.project / "rules.txt"
+        v = loop.validate(self.project, replace(self.cfg, agent_notes=str(editable)), self.layout)
+        self.assertEqual(v.errors, [f"agents.notes: {editable} is a file the loop may edit; keep the notes "
+                                    "outside the editable files, or add it to harness.frozen"])
+        inside = self.project / ".rsi" / "notes.md"
+        inside.write_text("notes\n")
+        cfg = replace(self.cfg, agent_notes=str(inside), editable=("**",))
+        self.assertEqual(loop.validate(self.project, cfg, self.layout).errors, [])
+
     def test_task_file_inside_the_repo(self):
         inside = self.project / "bench.jsonl"
         inside.write_text('{"id": "a"}\n{"id": "b"}\n')

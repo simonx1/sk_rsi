@@ -854,14 +854,28 @@ class NotesTest(ToyCase):
         notes = self.home / "toy" / "notes.md"
         notes.parent.mkdir(parents=True, exist_ok=True)
         notes.write_text("Rule files are read top to bottom.\n")
-        project = self.make_toy(rounds=1, external=True, agents_extra='notes = "notes.md"',
+        project = self.make_toy(rounds=2, external=True, agents_extra='notes = "notes.md"',
                                 proposer_prefix=f"rm -f {shlex.quote(str(notes))}; ")
         err = io.StringIO()
         with mock.patch("sys.stderr", err):
             st = loop.run(project, promote=False)
         self.assertEqual(st.status, "done")
         self.assertEqual(err.getvalue().count(f"warning: the notes file {notes} is gone"), 1)
-        self.assertNotIn("Rule files are read", self.prompt(st.run, 0, "select"))
+        # Read once per round, before the proposers start: round 1 keeps what it read.
+        self.assertIn("Rule files are read", self.prompt(st.run, 0, "select"))
+        self.assertNotIn("Rule files are read", self.prompt(st.run, 1, "s1"))
+
+    def test_the_notes_file_is_read_only_while_agents_work(self):
+        notes = self.home / "toy" / "notes.md"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text("Rule files are read top to bottom.\n")
+        seen = self.tmp / "seen"
+        probe = f"if [ -w {shlex.quote(str(notes))} ]; then echo writable; else echo read-only; fi >> {shlex.quote(str(seen))}; "
+        project = self.make_toy(rounds=1, external=True, agents_extra='notes = "notes.md"',
+                                proposer_prefix=probe, selector_prefix=probe)
+        loop.run(project, promote=False)
+        self.assertEqual(set(seen.read_text().split()), {"read-only"})
+        self.assertTrue(os.access(notes, os.W_OK))
 
 
 class ProgressTest(ToyCase):

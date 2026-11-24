@@ -97,8 +97,19 @@ def validate(project: Path, cfg: config.Config, layout: Layout, save_split: bool
             errors.append(
                 f"{denied} contains pattern characters (* ? [ ] {{ }}), so agents cannot be denied it reliably; "
                 "use a path without them")
-    if cfg.agent_notes and not Path(cfg.agent_notes).is_file():
-        errors.append(f"agents.notes: {cfg.agent_notes} does not exist")
+    if cfg.agent_notes:
+        notes = Path(cfg.agent_notes)
+        if not notes.is_file():
+            errors.append(f"agents.notes: {notes} does not exist")
+        else:
+            try:
+                relative = notes.resolve().relative_to(project.resolve()).as_posix()
+            except ValueError:
+                relative = None   # outside the repository: no edit can reach it
+            if (relative and not relative.startswith(".rsi/") and workspace.matches_any(relative, cfg.editable)
+                    and not workspace.matches_any(relative, cfg.frozen)):
+                errors.append(f"agents.notes: {notes} is a file the loop may edit; keep the notes outside "
+                              "the editable files, or add it to harness.frozen")
     for name in ("run_task", "check", "ingest"):
         command = getattr(cfg, name)
         if command and workspace.command_in_editable(command, project, cfg.editable, cfg.frozen):
@@ -148,6 +159,7 @@ class Ctx:
     step_began: float = 0.0   # time.monotonic() when the running step started
     tracker: progress.Tracker = field(default_factory=progress.Tracker)
     notes_gone: bool = False  # the notes file went missing; warned once
+    notes_read: tuple[int, str | None] | None = None  # (round, text): the notes are read once a round
 
     @property
     def main_wt(self) -> Path:
@@ -630,7 +642,7 @@ def _call_agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dic
         cfg.agent_cli, cfg.agent_model, cfg.agent_effort, cfg.agent_timeout_s)
     env = {"RSI_ROUND": str(ctx.state.round), **env}
     # Agents read the shared folders; only the framework writes them. The selector also only reads its worktree.
-    readonly = [ctx.rl.feedback, ctx.rl.history] + ([cwd] if role == "selector" else [])
+    readonly = _shared(ctx) + ([cwd] if role == "selector" else [])
     gitfile = workspace.read_gitfile(cwd)
     result = agents.run_agent(role, command, prompt, cwd, out, ctx.rl.feedback, ctx.rl.history,
                               denied_paths(ctx.cfg, ctx.layout), ctx.cfg.agent_timeout_s, env, readonly)
@@ -691,23 +703,37 @@ def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str
 
 
 def _notes(ctx: Ctx) -> str | None:
-    """The owner's notes as they are now: read for each agent call, so they can be edited between rounds."""
+    """The owner's notes for this round.
+
+    Read once a round, before the proposers start, so an edit reaches the next round, and nothing an
+    agent does during the round can change what the selector is shown. The file is also read-only on
+    disk while agents work (see _shared).
+    """
     path = ctx.cfg.agent_notes
     if not path:
         return None
+    with ctx.lock:
+        if ctx.notes_read is not None and ctx.notes_read[0] == ctx.state.round:
+            return ctx.notes_read[1]
     try:
-        return Path(path).read_text()
+        text: str | None = Path(path).read_text()
+        warn = False
+        with ctx.lock:
+            ctx.notes_gone = False
     except OSError:
+        text = None
         with ctx.lock:
             warn, ctx.notes_gone = not ctx.notes_gone, True
-        if warn:
-            _say(f"warning: the notes file {path} is gone; the agents get no notes until it is back")
-        return None
+    if warn:
+        _say(f"warning: the notes file {path} is gone; the agents get no notes until it is back")
+    with ctx.lock:
+        ctx.notes_read = (ctx.state.round, text)
+    return text
 
 
 def _shared(ctx: Ctx) -> list[Path]:
-    """The folders agents read and only the framework writes."""
-    return [ctx.rl.feedback, ctx.rl.history]
+    """The folders agents read and only the framework writes, and the owner's notes file."""
+    return [ctx.rl.feedback, ctx.rl.history] + ([Path(ctx.cfg.agent_notes)] if ctx.cfg.agent_notes else [])
 
 
 def _write_history(ctx: Ctx) -> None:
@@ -760,6 +786,7 @@ def _propose(ctx: Ctx) -> None:
     table = current.table(cfg.pass_threshold)
     metrics = current.metric_means()
     evidence = _read_jsonl(ctx.hist() / "evidence.jsonl")
+    notes = _notes(ctx)
 
     # Worktrees are created one at a time: concurrent `git worktree add` calls can collide.
     waiting = [c for c in st.candidates if c["status"] == "new" and not c["agent_done"]]
@@ -777,7 +804,7 @@ def _propose(ctx: Ctx) -> None:
         prompt = prompts.proposer_prompt(cfg, st.benchmark, memory, table, evidence, st.scores[-1],
                                          _eval_dir(st), ctx.rl.feedback, ctx.rl.history, out,
                                          metrics=metrics, limits=cfg.constraints, used=st.metric_ratio,
-                                         notes=_notes(ctx))
+                                         notes=notes)
         manifest, failure = _agent(ctx, "proposer", prompt, worktree, out, {"RSI_SAMPLE": c["sample"]},
                                    agents.read_manifest, reset=lambda: workspace.clean(worktree))
         with ctx.lock:

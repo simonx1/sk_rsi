@@ -255,9 +255,11 @@ more, except after a timeout.
 **Notes for the agents.** `notes = "agent-notes.md"` under `[agents]` names a text file of standing
 notes from you: what is off limits and why, what has been measured, where to look. A relative path is
 relative to the config file's folder. The text is shown to the proposer and to the selector at both of
-its steps. It is read again for every agent call, so an edit reaches the next round without a restart.
-A run does not start when the file is missing; if it goes missing later, the loop warns once and goes
-on without it.
+its steps. It is read once a round, before the proposers start, so an edit reaches the next round
+without a restart. While agents work the file is read-only on disk, like the feedback and history
+folders, so nothing an agent does can change what the selector is shown. A run does not start when the
+file is missing or is one the loop may edit; if it goes missing later, the loop warns once and goes on
+without it.
 
 ## Progress
 
