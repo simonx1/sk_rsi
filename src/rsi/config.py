@@ -7,6 +7,8 @@ import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import progress
+
 # Names become directory names, so they start with a letter or digit: ".." would leave the state directory.
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -66,6 +68,10 @@ class Config:
     draft: bool = False
     branch_prefix: str = "rsi/"
     confirm: bool = False                # measure a chosen candidate once more before keeping it
+    progress_line: str = progress.DEFAULT_LINE
+    progress_events: str = "all"         # lines for finished task runs and agent calls: "all", "failures", "none"
+    progress_interval_s: float = 5.0     # redraw period on a terminal
+    progress_log_interval_s: float = 300.0   # period of the plain progress line when the output is not a terminal
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -122,6 +128,10 @@ _SCHEMA = (
     ("promotion", "mode", "promotion_mode", str, "per_run"),
     ("promotion", "draft", "draft", bool, False),
     ("promotion", "branch_prefix", "branch_prefix", str, "rsi/"),
+    ("progress", "line", "progress_line", str, progress.DEFAULT_LINE),
+    ("progress", "events", "progress_events", str, "all"),
+    ("progress", "interval_s", "progress_interval_s", float, 5.0),
+    ("progress", "log_interval_s", "progress_log_interval_s", float, 300.0),
 )
 
 
@@ -150,6 +160,10 @@ def _coerce(where: str, raw: object, kind: type) -> object:
 
 
 def _check_ranges(cfg: Config) -> None:
+    try:
+        progress.check_template(cfg.progress_line)
+    except ValueError as error:
+        raise ConfigError(str(error)) from None
     rules = (
         (NAME_RE.match(cfg.name),
          "project.name must start with a letter or digit and contain only letters, digits, '.', '_' and '-'"),
@@ -172,6 +186,9 @@ def _check_ranges(cfg: Config) -> None:
         (0 <= cfg.max_infra_failure_rate <= 1, "budget.max_infra_failure_rate must be from 0 to 1"),
         (cfg.min_gain is None or cfg.min_gain >= 0, "budget.min_gain must be 0 or more"),
         (not cfg.confirm or cfg.paired, "tasks.confirm needs tasks.paired = true"),
+        (cfg.progress_events in ("all", "failures", "none"), 'progress.events must be "all", "failures" or "none"'),
+        (cfg.progress_interval_s > 0, "progress.interval_s must be positive"),
+        (cfg.progress_log_interval_s > 0, "progress.log_interval_s must be positive"),
         (not (cfg.paired and cfg.heldout == "every_round"),
          'tasks.paired cannot be combined with tasks.heldout = "every_round"'),
         (cfg.agent_cli in ("claude", "agy"), 'agents.cli must be "claude" or "agy"'),

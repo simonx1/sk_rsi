@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from rsi import config
+from rsi import config, progress
 
 MINIMAL = """
 [project]
@@ -193,6 +193,25 @@ branch_prefix = "sk-rsi-"
         for text, fragment in cases:
             with self.subTest(fragment=fragment):
                 self.assert_error(text, fragment)
+
+    def test_progress_defaults_and_keys(self):
+        cfg = config.parse(MINIMAL)
+        self.assertEqual((cfg.progress_line, cfg.progress_events, cfg.progress_interval_s, cfg.progress_log_interval_s),
+                         (progress.DEFAULT_LINE, "all", 5.0, 300.0))
+        cfg = config.parse(MINIMAL + '\n[progress]\nline = "{step} {done}/{total}"\nevents = "failures"\n'
+                                     'interval_s = 1\nlog_interval_s = 60\n')
+        self.assertEqual((cfg.progress_line, cfg.progress_events, cfg.progress_interval_s, cfg.progress_log_interval_s),
+                         ("{step} {done}/{total}", "failures", 1.0, 60.0))
+        for body, fragment in (('line = "{nope}"', "unknown field nope in progress.line"),
+                               ('events = "some"', 'progress.events must be "all", "failures" or "none"'),
+                               ("interval_s = 0", "progress.interval_s must be positive"),
+                               ("log_interval_s = -1", "progress.log_interval_s must be positive")):
+            with self.subTest(body=body):
+                self.assert_error(MINIMAL + "\n[progress]\n" + body + "\n", fragment)
+        old = config.parse(MINIMAL).to_dict()
+        for key in ("progress_line", "progress_events", "progress_interval_s", "progress_log_interval_s"):
+            del old[key]
+        self.assertEqual(config.Config.from_dict(old), config.parse(MINIMAL))
 
     def test_round_trip_through_dict(self):
         cfg = config.parse(MINIMAL)
