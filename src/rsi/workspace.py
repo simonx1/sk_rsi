@@ -14,15 +14,54 @@ class GitError(Exception):
     pass
 
 
+# Agents can write in the worktrees the loop runs git in. These settings keep a git config an agent
+# planted from running a command (an fsmonitor) and keep repository hooks out of the loop's own git calls.
+# The real guard is require_gitfile(): a worktree whose .git was replaced is refused.
+SAFE = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+
 def git(cwd: Path, *args: str, check: bool = True) -> str:
-    done = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+    done = subprocess.run(["git", *SAFE, *args], cwd=str(cwd), capture_output=True, text=True)
     if check and done.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {done.stderr.strip()}")
     return done.stdout.strip()
 
 
 def git_ok(cwd: Path, *args: str) -> bool:
-    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True).returncode == 0
+    return subprocess.run(["git", *SAFE, *args], cwd=str(cwd), capture_output=True).returncode == 0
+
+
+def read_gitfile(worktree: Path) -> str | None:
+    """The text of a linked worktree's .git file, or None when .git is not a plain file."""
+    path = worktree / ".git"
+    if path.is_symlink() or not path.is_file():
+        return None
+    return path.read_text()
+
+
+def require_gitfile(worktree: Path) -> None:
+    """Refuse a worktree whose .git does not point at a worktree record of a repository outside it.
+
+    A .git that an agent replaced could point git at a configuration the agent wrote.
+    """
+    text = read_gitfile(worktree)
+    target = Path(text.strip()[len("gitdir:"):].strip()) if text and text.startswith("gitdir:") else None
+    if (target is None or not target.is_absolute() or target.parent.name != "worktrees"
+            or target.resolve().is_relative_to(worktree.resolve())):
+        raise GitError(f"{worktree}/.git is not the worktree's own .git file; refusing to run git there")
+
+
+def restore_gitfile(worktree: Path, text: str) -> bool:
+    """Put a worktree's .git file back as it was. Returns True when it had been changed."""
+    if read_gitfile(worktree) == text:
+        return False
+    path = worktree / ".git"
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+    path.write_text(text)
+    return True
 
 
 def repo_root(path: Path) -> Path:
@@ -163,6 +202,7 @@ def reset_worktree(repo: Path, path: Path, branch: str, start: str) -> None:
 
 def commit_all(worktree: Path, message: str, paths: list[str] | None = None) -> str | None:
     """Commit every change (or only those under `paths`). Returns the new commit, or None when there is nothing."""
+    require_gitfile(worktree)
     git(worktree, "add", "-A", "--", *(paths or ["."]))
     if git_ok(worktree, "diff", "--cached", "--quiet"):
         return None
@@ -187,6 +227,7 @@ def clean(worktree: Path) -> list[str]:
 
     Returns what was discarded, as `git status` lines.
     """
+    require_gitfile(worktree)
     dirty = [line for line in git(worktree, "status", "--porcelain", "--ignored").splitlines() if line]
     if dirty:
         git(worktree, "reset", "--hard", "-q")
@@ -196,6 +237,7 @@ def clean(worktree: Path) -> list[str]:
 
 def cherry_pick(worktree: Path, sha: str) -> bool:
     """Apply one commit on top of the worktree's HEAD. On a conflict nothing is left behind and it returns False."""
+    require_gitfile(worktree)
     if git_ok(worktree, "cherry-pick", "--allow-empty", sha):
         return True
     git(worktree, "cherry-pick", "--abort", check=False)
@@ -209,6 +251,7 @@ def set_branch(repo: Path, branch: str, sha: str) -> None:
 
 
 def fast_forward(worktree: Path, sha: str) -> None:
+    require_gitfile(worktree)
     git(worktree, "merge", "--ff-only", sha)
 
 

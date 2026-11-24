@@ -65,6 +65,7 @@ class Config:
     promotion_mode: str = "per_run"      # or "per_edit": one pull request per accepted edit
     draft: bool = False
     branch_prefix: str = "rsi/"
+    confirm: bool = False                # measure a chosen candidate once more before keeping it
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -99,6 +100,7 @@ _SCHEMA = (
     ("tasks", "pass_threshold", "pass_threshold", float, 0.5),
     ("tasks", "heldout", "heldout", str, "endpoints"),
     ("tasks", "paired", "paired", bool, False),
+    ("tasks", "confirm", "confirm", bool, False),
     ("commands", "run_task", "run_task", str, _REQUIRED),
     ("commands", "check", "check", str, None),
     ("commands", "ingest", "ingest", str, None),
@@ -169,6 +171,7 @@ def _check_ranges(cfg: Config) -> None:
         (cfg.tolerance >= 0, "budget.tolerance must be 0 or more"),
         (0 <= cfg.max_infra_failure_rate <= 1, "budget.max_infra_failure_rate must be from 0 to 1"),
         (cfg.min_gain is None or cfg.min_gain >= 0, "budget.min_gain must be 0 or more"),
+        (not cfg.confirm or cfg.paired, "tasks.confirm needs tasks.paired = true"),
         (not (cfg.paired and cfg.heldout == "every_round"),
          'tasks.paired cannot be combined with tasks.heldout = "every_round"'),
         (cfg.agent_cli in ("claude", "agy"), 'agents.cli must be "claude" or "agy"'),

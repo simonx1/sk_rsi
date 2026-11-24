@@ -69,8 +69,13 @@ def _read_result(out_dir: Path) -> tuple[float, str, dict[str, float]]:
     return float(score), summary if isinstance(summary, str) else str(summary), metrics
 
 
-def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: Path, benchmark: str) -> Rollout:
-    """Run one task once. A finished rollout is read back instead of run again."""
+def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: Path, benchmark: str,
+                current: bool = False) -> Rollout:
+    """Run one task once. A finished rollout is read back instead of run again.
+
+    `current` marks the version the loop holds now (it passed before); run_task sees RSI_CURRENT=1 and
+    may treat a failure there as a failed measurement rather than a score of 0.
+    """
     marker = out_dir / MARKER
     if marker.is_file():
         return Rollout(**json.loads(marker.read_text()))
@@ -94,6 +99,7 @@ def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: 
             "RSI_ROLLOUT": str(rollout),
             "RSI_MODEL": cfg.model,
             "RSI_BENCHMARK": benchmark,
+            "RSI_CURRENT": "1" if current else "",
         }
         done = shell.run(command, cwd=checkout, timeout=cfg.task_timeout_s, env=env)
     finally:
@@ -184,10 +190,12 @@ def evaluate_many(
     task_list: list[dict],
     targets: dict[str, tuple[Path, Path]],
     benchmark: str,
+    current: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, EvalResult]:
     """Score several checkouts at once, at most cfg.parallel rollouts at a time.
 
-    `targets` maps a name to (checkout, results_dir).
+    `targets` maps a name to (checkout, results_dir); the targets named in `current` are the version
+    the loop holds now.
     """
     collected: dict[str, list[Rollout]] = {name: [] for name in targets}
     pool = ThreadPoolExecutor(max_workers=cfg.parallel)
@@ -199,7 +207,7 @@ def evaluate_many(
             for task in task_list:
                 for name, (checkout, results_dir) in targets.items():
                     out_dir = results_dir / task["id"] / f"r{k}"
-                    futures[pool.submit(run_rollout, cfg, task, k, checkout, out_dir, benchmark)] = name
+                    futures[pool.submit(run_rollout, cfg, task, k, checkout, out_dir, benchmark, name in current)] = name
         for future in as_completed(futures):
             collected[futures[future]].append(future.result())
     except (KeyboardInterrupt, SystemExit):
@@ -218,5 +226,7 @@ def evaluate_many(
     return results
 
 
-def evaluate(cfg: Config, task_list: list[dict], checkout: Path, results_dir: Path, benchmark: str) -> EvalResult:
-    return evaluate_many(cfg, task_list, {"only": (checkout, results_dir)}, benchmark)["only"]
+def evaluate(cfg: Config, task_list: list[dict], checkout: Path, results_dir: Path, benchmark: str,
+             current: bool = False) -> EvalResult:
+    return evaluate_many(cfg, task_list, {"only": (checkout, results_dir)}, benchmark,
+                         current={"only"} if current else frozenset())["only"]

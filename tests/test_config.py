@@ -121,6 +121,7 @@ pull_request = false
     def test_new_keys_default_off(self):
         cfg = config.parse(MINIMAL)
         self.assertEqual((cfg.repo, cfg.paired, cfg.min_gain, cfg.constraints), (None, False, None, ()))
+        self.assertFalse(cfg.confirm)
         self.assertEqual((cfg.agent_cli, cfg.agent_model, cfg.agent_effort), ("claude", None, None))
         self.assertEqual((cfg.promotion_mode, cfg.draft, cfg.branch_prefix), ("per_run", False, "rsi/"))
 
@@ -157,7 +158,7 @@ branch_prefix = "sk-rsi-"
     def test_from_dict_fills_new_keys(self):
         old = config.parse(MINIMAL).to_dict()
         for key in ("repo", "paired", "min_gain", "constraints", "agent_cli", "agent_model", "agent_effort",
-                    "promotion_mode", "draft", "branch_prefix"):
+                    "promotion_mode", "draft", "branch_prefix", "confirm"):
             del old[key]
         self.assertEqual(config.Config.from_dict(old), config.parse(MINIMAL))
 
@@ -180,6 +181,7 @@ branch_prefix = "sk-rsi-"
             (MINIMAL + '\n[tasks]\npaired = true\nheldout = "every_round"\n',
              'tasks.paired cannot be combined with tasks.heldout = "every_round"'),
             (MINIMAL + "\n[budget]\nmin_gain = -1\n", "budget.min_gain"),
+            (MINIMAL + "\n[tasks]\nconfirm = true\n", "tasks.confirm needs tasks.paired"),
             (MINIMAL + '\n[agents]\ncli = "codex"\n', 'agents.cli must be "claude" or "agy"'),
             (MINIMAL + '\n[agents]\ncli = "agy"\n', 'agents.model is required when agents.cli is "agy"'),
             (MINIMAL + '\n[promotion]\nmode = "per_commit"\n', 'promotion.mode must be "per_run" or "per_edit"'),

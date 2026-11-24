@@ -35,6 +35,7 @@ rollouts = 1
 pass_threshold = 0.5
 heldout = "endpoints"        # or "every_round"
 # paired = true              # for a noisy measurement: score the current version again beside the candidates
+# confirm = true             # with paired: measure a chosen candidate once more before keeping it
 
 [commands]
 # Placeholders arrive shell-quoted, so do not quote them: {task_file} {task_id} {checkout} {out} {rollout}
@@ -137,6 +138,10 @@ def _status_lines(st: RunState, layout: Layout) -> list[str]:
     constraints = config.Config.from_dict(st.config).constraints if st.config.get("constraints") else ()
     if constraints:
         lines.append("Limits: " + "; ".join(measure.describe(s) for s in measure.used_status(constraints, st.metric_ratio)))
+    failed = st.heldout.get("failed") or {}
+    if failed.get("start") or failed.get("final"):
+        lines.append(f"Held-out: failed runs: start {failed['start']} of {failed['total']}, "
+                     f"final {failed['final']} of {failed['total']}")
     if st.heldout.get("limits"):
         lines.append("Held-out limits: " + "; ".join(measure.describe(s) for s in st.heldout["limits"]))
     if st.promoted:
@@ -207,13 +212,15 @@ def _dry_run(proj: projects.Project, rounds: int | None) -> int:
         return 2
     rounds = cfg.rounds if rounds is None else rounds
     total = loop.planned_task_runs(len(checked.evolve), len(checked.heldout), cfg.rollouts, rounds,
-                                   cfg.candidates, cfg.heldout == "every_round", cfg.paired)
+                                   cfg.candidates, cfg.heldout == "every_round", cfg.paired, cfg.confirm)
     print(f"up to {total} task runs")
     print(f"  {_plural(len(checked.evolve), 'evolve task')}, {_plural(len(checked.heldout), 'held-out task')}, "
           f"{_plural(cfg.rollouts, 'rollout')} each")
     print(f"  {_plural(rounds, 'round')}, up to {_plural(cfg.candidates, 'candidate')} evaluated per round")
     if cfg.paired:
         print("  the current version is measured again in every round, beside the candidates")
+        if cfg.confirm:
+            print("  a chosen change is measured once more beside the current version before it is kept")
         print("  held-out scored once at the end, the starting and the final version together")
     else:
         print(f"  held-out scored {'after every round' if cfg.heldout == 'every_round' else 'at the start and the end'}")

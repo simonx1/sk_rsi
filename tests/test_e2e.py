@@ -34,7 +34,7 @@ class TwoRoundsTest(ToyCase):
         st = self.st
         self.assertEqual((st.status, st.round), ("done", 2))
         self.assertEqual(st.scores, [33.33, 66.67, 83.33])
-        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33, "failed": {"start": 0, "final": 0, "total": 6}})
         self.assertEqual(st.promoted["skipped"], "the project has no git remote")
         self.assertEqual(
             git(self.project, "show", f"{st.branch}:rules.txt").splitlines(),
@@ -240,7 +240,7 @@ class GuardsTest(ToyCase):
         git(project, "commit", "-q", "-am", "a selector that edits files")
         st = loop.run(project)
         self.assertEqual(st.scores, [33.33, 66.67, 83.33])
-        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33, "failed": {"start": 0, "final": 0, "total": 6}})
         memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
         self.assertEqual(len(memory["problems"][0]["attempts"]), 2)
         tree = git(project, "ls-tree", "-r", "--name-only", st.branch).splitlines()
@@ -271,7 +271,7 @@ class GuardsTest(ToyCase):
         with mock.patch.object(loop, "_out_of_time", return_value=True):
             st = loop.run(project)
         self.assertEqual((st.status, st.round, st.scores, st.rounds_log), ("done", 0, [33.33], []))
-        self.assertEqual(st.heldout, {"start": 33.33, "end": 33.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 33.33, "failed": {"start": 0, "final": 0, "total": 6}})
 
 
 class ResumeTest(ToyCase):
@@ -283,10 +283,10 @@ class ResumeTest(ToyCase):
         counter = itertools.count(1)
 
         # 6 held-out + 6 baseline rollouts run first, so the 15th new rollout is in round 0's evaluate step.
-        def dies_on_the_15th(cfg, task, rollout, checkout, out_dir, benchmark):
+        def dies_on_the_15th(cfg, task, rollout, checkout, out_dir, benchmark, *rest):
             if not (out_dir / evaluator.MARKER).exists() and next(counter) == 15:
                 raise RuntimeError("killed")
-            return real(cfg, task, rollout, checkout, out_dir, benchmark)
+            return real(cfg, task, rollout, checkout, out_dir, benchmark, *rest)
 
         with mock.patch.object(evaluator, "run_rollout", dies_on_the_15th):
             with self.assertRaises(RuntimeError):
@@ -297,7 +297,7 @@ class ResumeTest(ToyCase):
         st = loop.run(project)
         self.assertEqual(st.run, stopped.run)
         self.assertEqual(st.scores, [33.33, 66.67, 83.33])
-        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33, "failed": {"start": 0, "final": 0, "total": 6}})
         ran = call_log.read_text().splitlines()
         self.assertEqual(len(ran), len(set(ran)))
         memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
@@ -352,7 +352,7 @@ class KillTest(ToyCase):
         st = loop.run(project, promote=False)
         self.assertEqual((st.run, st.status), (stopped.run, "done"))
         self.assertEqual(st.scores, [33.33, 66.67, 83.33])
-        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33, "failed": {"start": 0, "final": 0, "total": 6}})
         memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
         self.assertEqual([a["round"] for a in memory["problems"][0]["attempts"]], [0, 1])
         self.assertFalse(layout.lock_file.exists())
@@ -363,7 +363,7 @@ class ExternalFilesTest(ToyCase):
         project = self.make_toy(external=True)
         st = loop.run(project)
         self.assertEqual(st.scores, [33.33, 66.67, 83.33])
-        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33, "failed": {"start": 0, "final": 0, "total": 6}})
         self.assertTrue(st.external)
         tree = git(project, "ls-tree", "-r", "--name-only", st.branch).splitlines()
         self.assertEqual([p for p in tree if p.startswith(".rsi")], [])
@@ -420,6 +420,28 @@ class ExternalFilesTest(ToyCase):
 
 class AgentCallsTest(ToyCase):
     TAMPER = "(echo x > {feedback_dir}/planted.txt; echo x > {history_dir}/planted.txt) 2>/dev/null; "
+
+    def fake_gitdir(self, marker):
+        """Shell text that points the agent's worktree at a git directory of its own, whose config runs a command."""
+        return ("mkdir -p fakegit/objects fakegit/refs; echo 'ref: refs/heads/main' > fakegit/HEAD; "
+                f"printf '[core]\\n\\trepositoryformatversion = 0\\n\\tfsmonitor = \"touch {marker}\"\\n' > fakegit/config; "
+                "rm -f .git; echo 'gitdir: fakegit' > .git; ")
+
+    def test_a_proposer_cannot_make_the_loop_run_its_git_config(self):
+        marker = self.tmp / "PWNED"
+        project = self.make_toy(rounds=1, candidates=1, proposer_prefix=self.fake_gitdir(marker))
+        st = loop.run(project)
+        self.assertFalse(marker.exists(), "the loop ran a command from a git config an agent wrote")
+        self.assertEqual(st.rounds_log[0]["dropped"],
+                         [{"sample": "s1", "reason": "agent failed: the agent changed the worktree's .git"}])
+
+    def test_a_selector_cannot_make_the_loop_run_its_git_config(self):
+        marker = self.tmp / "PWNED"
+        project = self.make_toy(rounds=1, candidates=1, selector_prefix=self.fake_gitdir(marker))
+        st = loop.run(project)
+        self.assertFalse(marker.exists(), "the loop ran a command from a git config an agent wrote")
+        self.assertEqual(st.rounds_log[0]["reason"], "selector failed: the agent changed the worktree's .git")
+        self.assertEqual(st.status, "done")
 
     def test_shared_folders_are_read_only_while_agents_run(self):
         project = self.make_toy(proposer_prefix=self.TAMPER, selector_prefix=self.TAMPER)
@@ -484,7 +506,7 @@ class AgentCallsTest(ToyCase):
 
 
 class PairedTest(ToyCase):
-    def conditions(self, factors=None, fail=None):
+    def conditions(self, factors=None, fail=None, where="/main"):
         """Change the scoring conditions before chosen steps.
 
         `factors` maps (step, round) to what every score is multiplied by from that step on, and `fail`
@@ -500,14 +522,15 @@ class PairedTest(ToyCase):
                 if key in factors:
                     factor_file.write_text(str(factors[key]))
                 if key == fail:
-                    fail_file.write_text("/main")
+                    fail_file.write_text(where)
                 else:
                     fail_file.unlink(missing_ok=True)
                 real(ctx)
             return handler
 
-        steps = ("baseline", "evaluate", "heldout_end")
-        self.enterContext(mock.patch.dict(loop._HANDLERS, {s: before(s, loop._HANDLERS[s]) for s in steps}))
+        steps = ("baseline", "evaluate", "confirm", "heldout_end")
+        self.enterContext(mock.patch.dict(loop._HANDLERS, {s: before(s, loop._HANDLERS[s]) for s in steps
+                                                          if s in loop._HANDLERS}))
 
     def test_a_drop_in_the_machines_is_not_a_loss(self):
         project = self.make_toy(tasks_extra="paired = true", rounds=1, candidates=1)
@@ -539,6 +562,44 @@ class PairedTest(ToyCase):
                     self.assertTrue(st.rounds_log[0]["reason"].startswith(
                         "guard: s1 gained 0.00 points, less than the 1.00 required"), st.rounds_log[0]["reason"])
 
+    def test_every_scoring_of_the_current_version_is_marked(self):
+        log = self.tmp / "current.log"
+        run_task = (f"echo \"$RSI_CURRENT $PWD\" >> {shlex.quote(str(log))}; "
+                    f"{sys.executable} score.py {{task_file}} {{checkout}} {{out}}")
+        project = self.make_toy(tasks_extra="paired = true", rounds=1, candidates=1, run_task=run_task)
+        st = loop.run(project)
+        self.assertEqual(st.rounds_log[0]["accepted"], "s1")
+        marks = {}
+        for line in log.read_text().splitlines():
+            flag, _, where = line.partition(" ")
+            marks.setdefault(Path(where).name, set()).add(flag)
+        self.assertEqual(marks, {"main": {"1"}, "start": {"1"}, "r0-s1": {""}})
+
+    def test_a_gain_that_holds_is_kept_with_the_second_measurement(self):
+        project = self.make_toy(tasks_extra="paired = true\nconfirm = true", rounds=1, candidates=1)
+        self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 1.0, ("confirm", 0): "0.9 /r0-s1"})
+        st = loop.run(project)
+        entry = st.rounds_log[0]
+        self.assertEqual(entry["accepted"], "s1")
+        self.assertEqual((entry["score_before"], entry["score_after"]), (33.33, 60.0))  # from the second measurement
+        rl = Layout("toy").run(st.run)
+        self.assertTrue((rl.feedback / f"{st.start_sha}.c0").is_dir())
+        self.assertTrue((rl.feedback / f"{entry['sha']}.c0").is_dir())
+        memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
+        self.assertEqual(memory["problems"][0]["attempts"][0]["score_after"], 60.0)
+
+    def test_a_gain_that_does_not_hold_is_not_kept(self):
+        project = self.make_toy(tasks_extra="paired = true\nconfirm = true", rounds=1, candidates=1,
+                                budget_extra="min_gain = 10")
+        self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 1.0, ("confirm", 0): "0.5 /r0-s1"})
+        st = loop.run(project)
+        entry = st.rounds_log[0]
+        self.assertIsNone(entry["accepted"])
+        self.assertTrue(entry["reason"].startswith(
+            "guard: s1 did not hold up when measured again: it gained 0.00 points, less than the 10.00 required"),
+            entry["reason"])
+        self.assertEqual(st.scores, [33.33, 33.33])
+
     def test_the_next_round_reads_the_newest_results(self):
         project = self.make_toy(tasks_extra="paired = true")
         st = loop.run(project)
@@ -560,6 +621,28 @@ class PairedTest(ToyCase):
         self.assertEqual(sorted(p.name for p in rl.heldout.iterdir()), ["end-final", "end-start"])
         self.assertFalse((rl.worktrees / "start").exists())
         self.assertEqual(git(project, "worktree", "list").count("\n"), 0)  # only the owner's checkout is left
+
+    def test_failed_heldout_runs_are_reported_and_make_drafts(self):
+        from rsi import promote
+        project = self.make_toy(tasks_extra="paired = true", rounds=1, candidates=1, metrics=True,
+                                tail='[[constraints]]\nmetric = "rules"\nmax_increase_pct = 200')
+        self.conditions(fail=("heldout_end", 1), where="/start")
+        st = loop.run(project, promote=False)
+        self.assertEqual(st.heldout["failed"], {"start": 6, "final": 0, "total": 6})
+        self.assertEqual(promote.run_warning(st),
+                         "the held-out measurement had failed runs (start 6 of 6, final 0 of 6), so its numbers are not reliable")
+        from rsi import cli
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["status", "--project", str(project)])
+        self.assertIn("Held-out: failed runs: start 6 of 6, final 0 of 6", out.getvalue())
+
+    def test_failed_heldout_runs_are_reported_without_pairing(self):
+        project = self.make_toy(rounds=1, candidates=1)
+        self.conditions(fail=("heldout_end", 1))
+        st = loop.run(project, promote=False)
+        self.assertEqual(st.heldout["failed"], {"start": 0, "final": 6, "total": 6})
 
     def test_nothing_accepted_scores_heldout_once(self):
         project = self.make_toy(script="script_guard.json", tasks_extra="paired = true", rounds=1, candidates=1)
@@ -586,10 +669,10 @@ class PairedTest(ToyCase):
         counter = itertools.count(1)
 
         # 6 baseline rollouts run first; the 9th new rollout is inside round 0's batch of 12.
-        def dies_on_the_9th(cfg, task, rollout, checkout, out_dir, benchmark):
+        def dies_on_the_9th(cfg, task, rollout, checkout, out_dir, benchmark, *rest):
             if not (out_dir / evaluator.MARKER).exists() and next(counter) == 9:
                 raise RuntimeError("killed")
-            return real(cfg, task, rollout, checkout, out_dir, benchmark)
+            return real(cfg, task, rollout, checkout, out_dir, benchmark, *rest)
 
         with mock.patch.object(evaluator, "run_rollout", dies_on_the_9th):
             with self.assertRaises(RuntimeError):
@@ -789,7 +872,7 @@ class OptionsTest(ToyCase):
     def test_heldout_every_round(self):
         project = self.make_toy(heldout="every_round")
         st = loop.run(project)
-        self.assertEqual(st.heldout, {"start": 33.33, "rounds": {"0": 66.67, "1": 83.33}, "end": 83.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "rounds": {"0": 66.67, "1": 83.33}, "end": 83.33, "failed": {"start": 0, "final": 0, "total": 6}})
 
     def test_live_evidence_reaches_the_prompt_but_heldout_evidence_does_not(self):
         feed = self.tmp / "feed.jsonl"

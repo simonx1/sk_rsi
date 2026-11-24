@@ -25,7 +25,11 @@ def main(task_file, checkout, out):
     correct = got == task["label"]
     summary = f"{task['text']!r}: got {got}, expected {task['label']}"
     factor_file = os.environ.get("TOY_FACTOR_FILE")  # tests: stands for machines that got faster or slower
-    factor = float(Path(factor_file).read_text()) if factor_file and os.path.exists(factor_file) else 1.0
+    factor = 1.0
+    if factor_file and os.path.exists(factor_file):  # "0.5", or "0.5 /r0-s1" for checkouts ending with that only
+        value, _, where = Path(factor_file).read_text().strip().partition(" ")
+        if not where or str(checkout).endswith(where):
+            factor = float(value)
     result = {"score": (1.0 if correct else 0.0) * factor, "summary": summary}
     if task.get("metrics"):
         result["metrics"] = {"rules": len(rules), "labels": len({label for _, label in rules})}

@@ -126,6 +126,12 @@ class RunTest(CliCase):
         self.assertIn("the current version is measured again in every round", out)
         self.assertIn("held-out scored once at the end, the starting and the final version together", out)
 
+    def test_dry_run_with_confirmation(self):
+        project = self.make_toy(tasks_extra="paired = true\nconfirm = true")
+        _, out, _ = self.rsi("run", "--dry-run", "--project", project)
+        self.assertIn("up to 90 task runs", out)
+        self.assertIn("a chosen change is measured once more beside the current version before it is kept", out)
+
     def test_run_then_status(self):
         project = self.make_toy()
         code, out, err = self.rsi("run", "--project", project)

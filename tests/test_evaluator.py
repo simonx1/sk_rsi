@@ -38,6 +38,8 @@ if mode == "raw":
     sys.exit(0)
 names = ("RSI_TASK_ID", "RSI_ROLLOUT", "RSI_MODEL", "RSI_BENCHMARK")
 summary = sys.argv[1] if mode == "where" else " ".join(os.environ[n] for n in names)
+if mode == "current":
+    summary = os.environ.get("RSI_CURRENT", "unset") or "empty"
 score = task["scores"][int(os.environ["RSI_ROLLOUT"]) - 1] if "scores" in task else task["score"]
 result = {"score": score, "summary": summary}
 metrics = task.get("metrics")
@@ -231,6 +233,19 @@ class EvaluateTest(unittest.TestCase):
         res = self.run_tasks([{"id": "a", "score": 0}], replace(self.cfg, rollouts=1))
         self.assertEqual((res.score(), res.rollouts[0].metrics), (100.0, {}))
         self.assertFalse(self.call_log.exists())
+
+    def test_the_current_version_is_marked_for_the_scorer(self):
+        x, y = self.tmp / "x", self.tmp / "y"
+        for folder in (x, y):
+            folder.mkdir()
+            (folder / "runner.py").write_text(RUNNER)
+        targets = {"x": (x, self.results / "x"), "y": (y, self.results / "y")}
+        results = evaluator.evaluate_many(replace(self.cfg, rollouts=1), [{"id": "a", "score": 1, "mode": "current"}],
+                                          targets, "bench-v1", current={"x"})
+        self.assertEqual({name: r.rollouts[0].summary for name, r in results.items()}, {"x": "1", "y": "empty"})
+        only = evaluator.evaluate(replace(self.cfg, rollouts=1), [{"id": "b", "score": 1, "mode": "current"}],
+                                  x, self.results / "z", "bench-v1", current=True)
+        self.assertEqual(only.rollouts[0].summary, "1")
 
     def test_rollouts_are_submitted_round_robin(self):
         x, y = self.tmp / "x", self.tmp / "y"

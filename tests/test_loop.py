@@ -20,6 +20,7 @@ class PlanTest(unittest.TestCase):
 
     def test_planned_task_runs_paired(self):
         self.assertEqual(loop.planned_task_runs(1, 1, 4, 5, 3, every_round=False, paired=True), 92)
+        self.assertEqual(loop.planned_task_runs(1, 1, 4, 5, 3, every_round=False, paired=True, confirm=True), 132)
         self.assertEqual(loop.planned_task_runs(6, 6, 1, 2, 3, every_round=False, paired=True), 66)
 
     def test_tolerance_is_compared_at_score_precision(self):
@@ -114,7 +115,7 @@ class StartTest(ToyCase):
         st = loop.run(project, rounds=0)
         self.assertEqual((st.status, st.step, st.round), ("done", "done", 0))
         self.assertEqual(st.scores, [33.33])
-        self.assertEqual(st.heldout, {"start": 33.33, "end": 33.33})
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 33.33, "failed": {"start": 0, "final": 0, "total": 6}})
         self.assertEqual(st.promoted, {"skipped": "no edit was accepted in this run"})
         self.assertEqual((st.benchmark, st.base_ref), ("toy-v1", "main"))
         self.assertEqual(st.evolve_ids, ["t01", "t02", "t03", "t04", "t05", "t06"])

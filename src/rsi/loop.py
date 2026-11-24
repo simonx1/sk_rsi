@@ -41,13 +41,13 @@ def _say(message: str) -> None:
 
 
 def planned_task_runs(evolve: int, heldout: int, rollouts: int, rounds: int, candidates: int,
-                      every_round: bool, paired: bool = False) -> int:
+                      every_round: bool, paired: bool = False, confirm: bool = False) -> int:
     """The most task runs a run can start: every candidate survives screening in every round.
 
     With paired measurement the current harness is scored again beside the candidates of every
     round, and held-out is scored once at the end, for the starting and the final harness.
     """
-    evolve_runs = evolve * rollouts * (1 + rounds * (candidates + (1 if paired else 0)))
+    evolve_runs = evolve * rollouts * (1 + rounds * (candidates + (1 if paired else 0) + (2 if confirm else 0)))
     heldout_runs = heldout * rollouts * ((rounds + 1) if every_round else 2)
     return evolve_runs + heldout_runs
 
@@ -351,7 +351,8 @@ def _drive(ctx: Ctx, promote: bool) -> None:
 def _evolve_now(ctx: Ctx) -> evaluator.EvalResult:
     """Evolve results of the current harness. Read back from disk once they exist."""
     st = ctx.state
-    return evaluator.evaluate(ctx.cfg, ctx.evolve, ctx.main_wt, ctx.rl.feedback / _eval_dir(st), st.benchmark)
+    return evaluator.evaluate(ctx.cfg, ctx.evolve, ctx.main_wt, ctx.rl.feedback / _eval_dir(st), st.benchmark,
+                              current=True)
 
 
 def _eval_dir(st: RunState) -> str:
@@ -361,7 +362,8 @@ def _eval_dir(st: RunState) -> str:
 
 def _heldout_now(ctx: Ctx) -> evaluator.EvalResult:
     st = ctx.state
-    return evaluator.evaluate(ctx.cfg, ctx.heldout, ctx.main_wt, ctx.rl.heldout / st.eval_sha, st.benchmark)
+    return evaluator.evaluate(ctx.cfg, ctx.heldout, ctx.main_wt, ctx.rl.heldout / st.eval_sha, st.benchmark,
+                              current=True)
 
 
 def _stop_if_evaluator_is_broken(ctx: Ctx, result: evaluator.EvalResult, what: str) -> None:
@@ -401,10 +403,15 @@ def _next_round(ctx: Ctx) -> None:
         st.step = "ingest"
 
 
+def _failed(result: evaluator.EvalResult) -> int:
+    return sum(1 for r in result.rollouts if r.error)
+
+
 def _heldout_start(ctx: Ctx) -> None:
     result = _heldout_now(ctx)
     _stop_if_evaluator_is_broken(ctx, result, "held-out")
     ctx.state.heldout["start"] = result.score()
+    ctx.state.heldout["failed"] = {"start": _failed(result), "final": 0, "total": len(result.rollouts)}
     ctx.state.step = "baseline"
 
 
@@ -421,7 +428,12 @@ def _heldout_end(ctx: Ctx) -> None:
     if ctx.cfg.paired:
         _heldout_paired(ctx)
     else:
-        st.heldout["end"] = _heldout_now(ctx).score()
+        result = _heldout_now(ctx)
+        st.heldout["end"] = result.score()
+        failed = st.heldout.setdefault("failed", {"start": 0, "final": 0, "total": len(result.rollouts)})
+        failed["final"] = _failed(result)
+    if any(st.heldout.get("failed", {}).get(side) for side in ("start", "final")):
+        _say("warning: some held-out runs failed; the held-out numbers are not reliable")
     st.step = "promote"
 
 
@@ -437,12 +449,13 @@ def _heldout_paired(ctx: Ctx) -> None:
     if any(entry["accepted"] for entry in st.rounds_log):
         workspace.add_detached_worktree(ctx.project, start_wt, st.start_sha)
         targets = {"start": (start_wt, ctx.rl.heldout / "end-start"), **targets}
-    results = evaluator.evaluate_many(ctx.cfg, ctx.heldout, targets, st.benchmark)
+    results = evaluator.evaluate_many(ctx.cfg, ctx.heldout, targets, st.benchmark, current=set(targets))
     workspace.remove_worktree(ctx.project, start_wt)
     final = results["final"]
     start = results.get("start", final)
     st.heldout = {"start": start.score(), "end": final.score(),
-                  "metrics_start": start.metric_means(), "metrics_end": final.metric_means()}
+                  "metrics_start": start.metric_means(), "metrics_end": final.metric_means(),
+                  "failed": {"start": _failed(start), "final": _failed(final), "total": len(final.rollouts)}}
     # The limits once more, on this independent measurement of start against final: the run's final total.
     st.heldout["limits"] = measure.limit_status(ctx.cfg.constraints, {}, st.heldout["metrics_start"],
                                                 st.heldout["metrics_end"])
@@ -501,8 +514,13 @@ def _call_agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dic
     env = {"RSI_ROUND": str(ctx.state.round), **env}
     # Agents read the shared folders; only the framework writes them. The selector also only reads its worktree.
     readonly = [ctx.rl.feedback, ctx.rl.history] + ([cwd] if role == "selector" else [])
+    gitfile = workspace.read_gitfile(cwd)
     result = agents.run_agent(role, command, prompt, cwd, out, ctx.rl.feedback, ctx.rl.history,
                               denied_paths(ctx.cfg, ctx.layout), ctx.cfg.agent_timeout_s, env, readonly)
+    if gitfile is not None and workspace.restore_gitfile(cwd, gitfile):
+        # Put back before any git runs there: a replaced .git can point git at a config the agent wrote.
+        _say(f"warning: the {role} changed {cwd}/.git; put back and its answer not used")
+        result = agents.AgentResult(False, "the agent changed the worktree's .git")
     if role == "selector":
         # A selector that can write (a custom agent command) must still leave the run branch as it was.
         discarded = workspace.clean(cwd)
@@ -711,7 +729,7 @@ def _evaluate(ctx: Ctx) -> None:
         # the same conditions. Its fresh result is the round's baseline.
         fresh = f"{st.eval_sha}.r{st.round}"
         targets = {BASELINE: (ctx.main_wt, ctx.rl.feedback / fresh), **targets}
-    results = evaluator.evaluate_many(ctx.cfg, ctx.evolve, targets, st.benchmark) if targets else {}
+    results = evaluator.evaluate_many(ctx.cfg, ctx.evolve, targets, st.benchmark, current={BASELINE}) if targets else {}
     if BASELINE in results:
         if any(r.error for r in results[BASELINE].rollouts):
             st.decision = {"accept": None, "baseline_failed": True,
@@ -719,16 +737,9 @@ def _evaluate(ctx: Ctx) -> None:
         else:
             st.eval_dir = fresh
     baseline = _evolve_now(ctx)
-    before, base_metrics = baseline.passing(threshold), baseline.metric_means()
     for c in kept:
-        result = results[c["sample"]]
-        fixed, missed, regressed = sim.outcome(c["manifest"]["predicted"], before, result.passing(threshold))
-        passed, total = result.passed_total(threshold)
-        metrics = result.metric_means()
-        c.update(status="evaluated", score=result.score(), fixed=fixed, missed=missed,
-                 regressed=regressed, passed=passed, total=total, table=result.table(threshold),
-                 metrics=metrics, observed=measure.changes(base_metrics, metrics),
-                 limits=measure.limit_status(ctx.cfg.constraints, st.metric_ratio, base_metrics, metrics))
+        _assess(ctx, c, results[c["sample"]], baseline)
+        c["status"] = "evaluated"
     st.step = "select"
 
 
@@ -777,6 +788,59 @@ def _select(ctx: Ctx) -> None:
                           f"below the current {current:.2f}; the selector's reason was: {reason}")
                 accept = None
     st.decision = {"accept": accept, "reason": reason}
+    _write_history(ctx)
+    st.step = "confirm" if accept and cfg.confirm else "record"
+
+
+def _assess(ctx: Ctx, c: dict, result: evaluator.EvalResult, baseline: evaluator.EvalResult) -> None:
+    """Fill a candidate's measured fields from its result, compared with the given baseline."""
+    threshold = ctx.cfg.pass_threshold
+    fixed, missed, regressed = sim.outcome(c["manifest"]["predicted"], baseline.passing(threshold),
+                                           result.passing(threshold))
+    passed, total = result.passed_total(threshold)
+    base_metrics, metrics = baseline.metric_means(), result.metric_means()
+    c.update(score=result.score(), fixed=fixed, missed=missed, regressed=regressed, passed=passed, total=total,
+             table=result.table(threshold), metrics=metrics, observed=measure.changes(base_metrics, metrics),
+             limits=measure.limit_status(ctx.cfg.constraints, ctx.state.metric_ratio, base_metrics, metrics))
+
+
+def _confirm(ctx: Ctx) -> None:
+    """Measure the chosen candidate once more beside the current version, and keep it only if it holds up.
+
+    The candidate was chosen as the best of several noisy measurements, so its first numbers flatter
+    it. This second, independent measurement decides, and its numbers are the ones recorded.
+    """
+    st, cfg = ctx.state, ctx.cfg
+    chosen = next(c for c in st.candidates if c["sample"] == st.decision["accept"])
+    workspace.clean(Path(chosen["worktree"]))
+    base_dir, cand_dir = f"{st.eval_sha}.c{st.round}", f"{chosen['sha']}.c{st.round}"
+    targets = {BASELINE: (ctx.main_wt, ctx.rl.feedback / base_dir), chosen["sample"]: (Path(chosen["worktree"]),
+                                                                                       ctx.rl.feedback / cand_dir)}
+    results = evaluator.evaluate_many(cfg, ctx.evolve, targets, st.benchmark, current={BASELINE})
+    baseline, result = results[BASELINE], results[chosen["sample"]]
+    again = "did not hold up when measured again"
+    if any(r.error for r in baseline.rollouts):
+        st.decision = {"accept": None, "reason": f"guard: {chosen['sample']} was not measured again: the "
+                                                 "baseline had failed runs; nothing can be compared"}
+    else:
+        st.eval_dir = base_dir
+        _assess(ctx, chosen, result, baseline)
+        chosen["eval_dir"] = cand_dir
+        current, gained = baseline.score(), round(chosen["score"] - baseline.score(), 2)
+        blocked = measure.blocking(chosen["limits"])
+        reason = None
+        if blocked:
+            reason = f"guard: {chosen['sample']} {again}: it is past a limit: {measure.describe(blocked[0])}"
+        elif cfg.min_gain is not None and gained < cfg.min_gain:
+            reason = (f"guard: {chosen['sample']} {again}: it gained {gained:.2f} points, "
+                      f"less than the {cfg.min_gain:.2f} required")
+        elif _below_tolerance(current, chosen["score"], cfg.tolerance):
+            reason = (f"guard: {chosen['sample']} {again}: it scored {chosen['score']:.2f}, more than "
+                      f"{cfg.tolerance:.2f} below the current {current:.2f}")
+        if reason:
+            st.decision = {"accept": None, "reason": f"{reason}; the selector's reason was: {st.decision['reason']}"}
+        else:
+            st.decision["confirmed"] = True
     _write_history(ctx)
     st.step = "record"
 
@@ -876,7 +940,8 @@ def _record(ctx: Ctx) -> None:
             workspace.remove_worktree(ctx.project, Path(c["worktree"]))
             workspace.delete_branch(ctx.project, c["branch"])
     if chosen:
-        st.eval_sha = st.eval_dir = chosen["sha"]
+        st.eval_sha = chosen["sha"]
+        st.eval_dir = chosen.get("eval_dir", chosen["sha"])
     st.current_sha = workspace.rev_parse(ctx.main_wt)
     st.scores.append(after)
     st.candidates, st.decision = [], None
@@ -903,6 +968,7 @@ _HANDLERS: dict[str, Callable[[Ctx], None]] = {
     "screen": _screen,
     "evaluate": _evaluate,
     "select": _select,
+    "confirm": _confirm,
     "record": _record,
     "heldout_round": _heldout_round,
     "heldout_end": _heldout_end,

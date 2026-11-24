@@ -160,6 +160,7 @@ editable = ["src/**", "config/**"]
 [tasks]
 rollouts = 4
 paired = true
+confirm = true
 
 [commands]
 run_task = "python3 ~/tools/measure.py {task_file} {checkout} {out} {rollout}"
@@ -206,6 +207,17 @@ between rounds then is not mistaken for a gain or a loss. Held-out is scored onc
 the starting and the final version together. This costs one more set of task runs per round;
 `rsi run --dry-run` shows the count. If a run of that fresh baseline fails, nothing is accepted that
 round.
+
+**Confirmation.** The candidate the selector picks is the best of several noisy measurements, so its
+first numbers flatter it: with many candidates, one that changes nothing will now and then look like
+a gain. With `confirm = true` (it needs `paired = true`) the chosen candidate and the current version
+are measured once more, in a batch of their own, and only that second measurement decides. Its
+numbers are the ones recorded. This costs two more sets of task runs per accepted round.
+
+**The current version.** `run_task` sees `RSI_CURRENT=1` when it scores the version the loop holds
+now (a version that passed before), and an empty `RSI_CURRENT` for a candidate. A scorer can treat a
+failure of the current version as a failed measurement (exit non-zero) rather than a score of 0, so a
+flaky failure of the baseline does not make every candidate look better.
 
 **Minimum gain.** `min_gain` is the number of score points a candidate must gain to be accepted.
 

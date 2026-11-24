@@ -42,7 +42,7 @@ class DocsTest(unittest.TestCase):
         self.assertEqual(cfg.name, "ticket-triage")
 
     NEW_KEYS = ("repo =", "paired =", "min_gain =", "[[constraints]]", "max_increase_pct", "max_decrease_pct",
-                "cli =", "mode =", "draft =", "branch_prefix =")
+                "cli =", "mode =", "draft =", "branch_prefix =", "confirm =")
 
     def measured_section(self):
         text = (ROOT / "README.md").read_text()
@@ -62,7 +62,7 @@ class DocsTest(unittest.TestCase):
 
     def test_readme_names_every_new_key(self):
         section = self.measured_section()
-        for key in self.NEW_KEYS + ("rsi init --external", '"metrics"', '"expected"', '"title"'):
+        for key in self.NEW_KEYS + ("rsi init --external", '"metrics"', '"expected"', '"title"', "RSI_CURRENT"):
             self.assertIn(key, section, key)
 
     def test_template_mentions_every_new_key_and_still_loads(self):

@@ -170,6 +170,10 @@ def build_edit_branches(project: Path, st: RunState, cfg: Config, scratch: Path)
 
 def run_warning(st: RunState) -> str | None:
     """Why this run's pull requests should not be merged without a closer look, if there is a reason."""
+    failed = st.heldout.get("failed") or {}
+    if failed.get("start") or failed.get("final"):
+        return (f"the held-out measurement had failed runs (start {failed['start']} of {failed['total']}, "
+                f"final {failed['final']} of {failed['total']}), so its numbers are not reliable")
     if _heldout_dropped(st):
         return f"the held-out score went down ({st.heldout['start']:.2f} → {st.heldout['end']:.2f})"
     blocked = measure.blocking(st.heldout.get("limits") or [])

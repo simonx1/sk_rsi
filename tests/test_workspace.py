@@ -172,6 +172,22 @@ class RepoTest(unittest.TestCase):
         workspace.set_branch(self.repo, "picked", a)
         self.assertEqual(workspace.rev_parse(self.repo, "picked"), a)
 
+    def test_a_worktree_whose_git_file_was_replaced_is_refused(self):
+        workspace.add_worktree(self.repo, self.wt, "cand/x", "main")
+        self.assertTrue(workspace.read_gitfile(self.wt).startswith("gitdir: "))
+        (self.wt / ".git").unlink()
+        (self.wt / "fake").mkdir()
+        (self.wt / ".git").write_text("gitdir: fake\n")
+        for call in (lambda: workspace.clean(self.wt), lambda: workspace.commit_all(self.wt, "x"),
+                     lambda: workspace.fast_forward(self.wt, "HEAD"), lambda: workspace.cherry_pick(self.wt, "HEAD")):
+            with self.assertRaises(workspace.GitError) as caught:
+                call()
+            self.assertIn(".git", str(caught.exception))
+        (self.wt / ".git").unlink()
+        (self.wt / ".git").symlink_to(self.repo / ".git")
+        with self.assertRaises(workspace.GitError):
+            workspace.clean(self.wt)
+
     def test_fast_forward_and_is_merged(self):
         main_wt = self.tmp / "main-wt"
         workspace.add_worktree(self.repo, main_wt, "rsi/run1", "main")
