@@ -356,6 +356,66 @@ class KillTest(ToyCase):
         self.assertFalse(layout.lock_file.exists())
 
 
+class ExternalFilesTest(ToyCase):
+    def test_nothing_of_the_loop_enters_the_repository(self):
+        project = self.make_toy(external=True)
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        self.assertEqual(st.heldout, {"start": 33.33, "end": 83.33})
+        self.assertTrue(st.external)
+        tree = git(project, "ls-tree", "-r", "--name-only", st.branch).splitlines()
+        self.assertEqual([p for p in tree if p.startswith(".rsi")], [])
+        subjects = git(project, "log", "--format=%s", f"main..{st.branch}").splitlines()
+        self.assertEqual(len(subjects), 2)  # the two accepted edits and nothing else
+        self.assertTrue(all(s.startswith(f"rsi: {st.run} r") for s in subjects))
+        memory = json.loads((self.home / "toy" / "sim.json").read_text())
+        self.assertEqual(len(memory["problems"][0]["attempts"]), 2)
+        self.assertEqual((self.home / "toy" / "log.md").read_text().count(f"| {st.run} |"), 2)
+        self.assertEqual(git(project, "status", "--porcelain"), "")
+        self.assertFalse((project / ".rsi").exists())
+
+    def test_record_step_can_run_twice(self):
+        project = self.make_toy(external=True, rounds=1)
+        real = loop._next_round
+        calls = itertools.count(1)
+
+        def dies_after_recording(ctx):
+            if next(calls) == 2:
+                raise RuntimeError("killed")
+            real(ctx)
+
+        with mock.patch.object(loop, "_next_round", dies_after_recording):
+            with self.assertRaises(RuntimeError):
+                loop.run(project)
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67])
+        memory = json.loads((self.home / "toy" / "sim.json").read_text())
+        self.assertEqual(len(memory["problems"][0]["attempts"]), 1)
+        self.assertEqual((self.home / "toy" / "log.md").read_text().count(f"| {st.run} | 0 |"), 1)
+
+    def test_second_run_sees_the_first_runs_memory(self):
+        project = self.make_toy(external=True)
+        first = loop.run(project)
+        self.write_config(project, external=True, rounds=1, candidates=1)  # read from disk when a run starts
+        self.use_script("script_second_run.json")
+        second = loop.run(project, from_ref=first.branch)
+        self.assertEqual(second.scores, [83.33, 100.0])
+        prompt = (Layout("toy").run(second.run).agents / "round-0" / "s1" / "prompt.md").read_text()
+        self.assertIn(first.run, prompt)
+        memory = json.loads((self.home / "toy" / "sim.json").read_text())
+        self.assertEqual([a["run"] for a in memory["problems"][0]["attempts"]], [first.run, first.run, second.run])
+
+    def test_a_setting_change_records_a_hop_without_a_commit(self):
+        project = self.make_toy(external=True)
+        first = loop.run(project)
+        self.write_config(project, external=True, model="model-b", rounds=0)
+        second = loop.run(project, from_ref=first.branch)
+        memory = json.loads((self.home / "toy" / "sim.json").read_text())
+        self.assertEqual(memory["carried_from"], [
+            {"run": first.run, "benchmark": "toy-v1", "model": "model-a", "into": second.run}])
+        self.assertEqual(git(project, "rev-parse", second.branch), git(project, "rev-parse", first.branch))
+
+
 class ContinuationTest(ToyCase):
     def test_setting_change_records_a_hop_and_carries_the_memory(self):
         project = self.make_toy()

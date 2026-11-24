@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import config, loop, outcomes, promote, sim, tasks, workspace
+from . import config, loop, outcomes, project as projects, promote, sim, tasks, workspace
 from .state import Layout, LockError, RunState
 
 TEMPLATE = """\
@@ -63,13 +63,8 @@ def _rounds(text: str) -> int:
     return value
 
 
-def _project(args: argparse.Namespace) -> Path:
-    return workspace.repo_root(Path(args.project or "."))
-
-
-def _load(project: Path) -> tuple[config.Config, Layout]:
-    cfg = config.load(project / loop.CONFIG_PATH)
-    return cfg, Layout(cfg.name)
+def _project(args: argparse.Namespace) -> projects.Project:
+    return projects.find(Path(args.project or "."))
 
 
 def _plural(count: int, noun: str) -> str:
@@ -115,25 +110,42 @@ def _status_lines(st: RunState, layout: Layout) -> list[str]:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    project = _project(args)
-    path = project / loop.CONFIG_PATH
+    repo = workspace.repo_root(Path(args.project or "."))
+    name = args.name or re.sub(r"[^A-Za-z0-9._-]", "-", repo.name)
+    if not config.NAME_RE.match(name):
+        print(f"rsi: {name!r} is not a usable project name", file=sys.stderr)
+        return 2
+    layout = Layout(name)
+    inside = repo / loop.CONFIG_PATH
+    path = layout.config_file if args.external else inside
     if path.exists():
         print(f"rsi: {path} already exists", file=sys.stderr)
         return 2
-    name = re.sub(r"[^A-Za-z0-9._-]", "-", project.name)
+    try:
+        existing = projects.find(repo)
+    except config.ConfigError:
+        existing = None
+    if existing is not None:
+        print(f"rsi: this repository already has a config: {existing.config_path}", file=sys.stderr)
+        return 2
+    text = TEMPLATE.replace("{name}", name)
+    if args.external:
+        text = text.replace('base_branch = "main"\n', f'base_branch = "main"\nrepo = {json.dumps(str(repo))}\n', 1)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(TEMPLATE.replace("{name}", name))
-    layout = Layout(name)
+    path.write_text(text)
     layout.private.mkdir(parents=True, exist_ok=True)
     print(f"Wrote {path}")
     print(f"Put the benchmark's tasks in {layout.tasks_path(None)}, one JSON object per line.")
-    print("Then edit the config, commit it, and run: rsi validate")
+    if args.external:
+        print("Then edit the config and run: rsi validate")
+    else:
+        print("Then edit the config, commit it, and run: rsi validate")
     return 0
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    project = _project(args)
-    cfg, layout = _load(project)
+    proj = _project(args)
+    project, cfg, layout = proj.repo, proj.cfg, proj.layout
     checked = loop.validate(project, cfg, layout, save_split=False)
     for warning in checked.warnings:
         print(f"warning: {warning}")
@@ -150,8 +162,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 2 if checked.errors or problem else 0
 
 
-def _dry_run(project: Path, rounds: int | None) -> int:
-    cfg, layout = _load(project)
+def _dry_run(proj: projects.Project, rounds: int | None) -> int:
+    project, cfg, layout = proj.repo, proj.cfg, proj.layout
     checked = loop.validate(project, cfg, layout, save_split=False)
     if checked.errors:
         for error in checked.errors:
@@ -169,37 +181,35 @@ def _dry_run(project: Path, rounds: int | None) -> int:
     return 0
 
 
-def _run(args: argparse.Namespace, project: Path) -> int:
-    st = loop.run(project, rounds=args.rounds, from_ref=args.from_ref,
+def _run(args: argparse.Namespace, proj: projects.Project) -> int:
+    st = loop.run(proj.repo, rounds=args.rounds, from_ref=args.from_ref,
                   promote=not args.no_promote, new=args.new)
-    cfg, layout = _load(project)
-    print("\n".join(_status_lines(st, layout)))
+    print("\n".join(_status_lines(st, proj.layout)))
     return 1 if st.promoted and "error" in st.promoted else 0
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    project = _project(args)
+    proj = _project(args)
     if args.dry_run:
-        return _dry_run(project, args.rounds)
-    return _run(args, project)
+        return _dry_run(proj, args.rounds)
+    return _run(args, proj)
 
 
 def cmd_continue(args: argparse.Namespace) -> int:
-    project = _project(args)
+    proj = _project(args)
     if args.dry_run:
-        return _dry_run(project, args.rounds)
-    cfg, layout = _load(project)
+        return _dry_run(proj, args.rounds)
+    cfg, layout = proj.cfg, proj.layout
     unfinished = loop.find_unfinished(layout)
     if unfinished and not args.new:
         raise loop.RunError(f"run {unfinished.run} is unfinished; finish it with `rsi run` or pass --new to abandon it")
     added = tasks.fold_pending(layout, layout.tasks_path(cfg.tasks_file))
     print(f"added {_plural(added, 'task')}; the benchmark is now {tasks.benchmark_label(cfg.benchmark, layout)}")
-    return _run(args, project)
+    return _run(args, proj)
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    project = _project(args)
-    _, layout = _load(project)
+    layout = _project(args).layout
     st = loop.latest_run(layout)
     if st is None:
         print("No runs yet.")
@@ -209,8 +219,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    project = _project(args)
-    cfg, layout = _load(project)
+    proj = _project(args)
+    project, cfg, layout = proj.repo, proj.cfg, proj.layout
     if not cfg.ingest:
         print("No ingest command is configured.")
         return 0
@@ -223,8 +233,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def cmd_promote(args: argparse.Namespace) -> int:
-    project = _project(args)
-    _, layout = _load(project)
+    proj = _project(args)
+    project, layout = proj.repo, proj.layout
     if args.run:
         state_file = layout.run(args.run).state_file
         if not state_file.is_file():
@@ -239,10 +249,13 @@ def cmd_promote(args: argparse.Namespace) -> int:
     if st.promoted and st.promoted.get("url"):  # already opened; asking again must not lose it
         print("\n".join(_promotion_lines(st.promoted)))
         return 0
-    try:
-        memory = json.loads(workspace.show(project, st.branch, loop.SIM_PATH))
-    except workspace.GitError:
-        memory = sim.empty()
+    if st.external:
+        memory = sim.load(layout.sim_file)
+    else:
+        try:
+            memory = json.loads(workspace.show(project, st.branch, loop.SIM_PATH))
+        except workspace.GitError:
+            memory = sim.empty()
     st.promoted = promote.promote(project, st, config.Config.from_dict(st.config), memory)
     st.save(layout.run(st.run).state_file)
     print("\n".join(_promotion_lines(st.promoted)))
@@ -250,16 +263,18 @@ def cmd_promote(args: argparse.Namespace) -> int:
 
 
 def cmd_sim_show(args: argparse.Namespace) -> int:
-    print(sim.render_text(sim.load(_project(args) / loop.SIM_PATH)))
+    print(sim.render_text(sim.load(_project(args).sim_path)))
     return 0
 
 
 def cmd_sim_merge(args: argparse.Namespace) -> int:
-    path = _project(args) / loop.SIM_PATH
+    proj = _project(args)
+    path = proj.sim_path
     memory = sim.load(path)
     sim.merge(memory, args.src, args.dst)
     sim.save(path, memory)
-    print(f"merged {args.src} into {args.dst} in {path}; commit the file to keep the change")
+    keep = "" if proj.external else "; commit the file to keep the change"
+    print(f"merged {args.src} into {args.dst} in {path}{keep}")
     return 0
 
 
@@ -274,7 +289,10 @@ def build_parser() -> argparse.ArgumentParser:
         sub.set_defaults(func=func)
         return sub
 
-    add("init", cmd_init, "Write a commented .rsi/config.toml and create the state directory.")
+    sub = add("init", cmd_init, "Write a commented config and create the state directory.")
+    sub.add_argument("--external", action="store_true",
+                     help="keep the config, memory and log under RSI_HOME instead of in the repository")
+    sub.add_argument("--name", help="project name (default: the repository folder's name)")
     add("validate", cmd_validate, "Check the config, the task file and the project's check command.")
     for name, func, text in (
         ("run", cmd_run, "Resume the unfinished run, or start one."),

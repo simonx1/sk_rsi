@@ -23,12 +23,13 @@ from pathlib import Path
 from typing import Callable
 
 from . import agents, config, evaluator, outcomes, prompts, shell, sim, tasks, workspace
+from . import project as projects
 from . import promote as promote_mod
 from .state import Layout, Lock, RunLayout, RunState, read_json
 
-CONFIG_PATH = ".rsi/config.toml"
-SIM_PATH = ".rsi/sim.json"
-LOG_PATH = ".rsi/log.md"
+CONFIG_PATH = projects.CONFIG_PATH
+SIM_PATH = projects.SIM_PATH
+LOG_PATH = projects.LOG_PATH
 
 
 class RunError(Exception):
@@ -146,6 +147,14 @@ class Ctx:
     def save(self) -> None:
         self.state.save(self.rl.state_file)
 
+    @property
+    def sim_path(self) -> Path:
+        return self.layout.sim_file if self.state.external else self.main_wt / SIM_PATH
+
+    @property
+    def log_path(self) -> Path:
+        return self.layout.log_file if self.state.external else self.main_wt / LOG_PATH
+
     def hist(self) -> Path:
         return self.rl.history / f"round-{self.state.round}"
 
@@ -153,11 +162,15 @@ class Ctx:
         return self.rl.agents / f"round-{self.state.round}" / name
 
 
-def _load_sim(worktree: Path) -> dict:
+def _read_sim(path: Path) -> dict:
     try:
-        return sim.load(worktree / SIM_PATH)
+        return sim.load(path)
     except sim.SimError as error:
         raise RunError(str(error)) from None
+
+
+def _load_sim(ctx: Ctx) -> dict:
+    return _read_sim(ctx.sim_path)
 
 
 def _runs(layout: Layout) -> list[RunState]:
@@ -191,26 +204,32 @@ def _new_run_id(project: Path, layout: Layout, now: datetime) -> str:
 
 # --- starting, resuming, abandoning ----------------------------------------
 
-def _start(project: Path, live: config.Config, layout: Layout,
-           from_ref: str | None, rounds: int | None, now: datetime) -> RunState:
+def _start(proj: projects.Project, from_ref: str | None, rounds: int | None, now: datetime) -> RunState:
+    project, live, layout = proj.repo, proj.cfg, proj.layout
     base_ref = from_ref or live.base_branch
-    try:
-        text = workspace.show(project, base_ref, CONFIG_PATH)
-    except workspace.GitError:
-        raise RunError(f"{CONFIG_PATH} is not committed on {base_ref}; commit it there first") from None
-    try:
-        cfg = config.parse(text)
-    except config.ConfigError as error:
-        raise config.ConfigError(f"{CONFIG_PATH} on {base_ref}: {error}") from None
-    if cfg.name != live.name:
-        raise RunError(f"project.name is {cfg.name!r} on {base_ref} but {live.name!r} in the working copy")
+    if proj.external:
+        cfg = live  # read from disk; nothing of the loop is committed in the repository
+    else:
+        try:
+            text = workspace.show(project, base_ref, CONFIG_PATH)
+        except workspace.GitError:
+            raise RunError(f"{CONFIG_PATH} is not committed on {base_ref}; commit it there first") from None
+        try:
+            cfg = config.parse(text)
+        except config.ConfigError as error:
+            raise config.ConfigError(f"{CONFIG_PATH} on {base_ref}: {error}") from None
+        if cfg.name != live.name:
+            raise RunError(f"project.name is {cfg.name!r} on {base_ref} but {live.name!r} in the working copy")
     checked = validate(project, cfg, layout)
     for warning in checked.warnings:
         _say(f"warning: {warning}")
     if checked.errors:
         raise RunError("; ".join(checked.errors))
     previous = latest_run(layout)
-    if previous and previous.status == "done" and not workspace.is_merged(project, previous.branch, base_ref):
+    # Only for an in-repo project: there the memory travels on the run branch. An external project's
+    # memory is one file, and its edits reach the base branch as separate pull requests.
+    if (not proj.external and previous and previous.status == "done"
+            and not workspace.is_merged(project, previous.branch, base_ref)):
         _say(f"warning: the previous run's branch {previous.branch} is not merged into {base_ref}, so its "
              f"edits and memory are not part of this run. Use --from {previous.branch} to build on it.")
 
@@ -226,21 +245,23 @@ def _start(project: Path, live: config.Config, layout: Layout,
         raise RunError(f"the starting harness does not pass check: {problem}")
 
     label = tasks.benchmark_label(cfg.benchmark, layout)
-    memory = _load_sim(main_wt)
+    sim_path = layout.sim_file if proj.external else main_wt / SIM_PATH
+    memory = _read_sim(sim_path)
     last = sim.latest_attempt(memory)
     if last and last["domain"] != {"benchmark": label, "model": cfg.model}:
         sim.add_hop(memory, {
             "run": last["run"], "benchmark": last["domain"]["benchmark"],
             "model": last["domain"]["model"], "into": run_id,
         })
-        sim.save(main_wt / SIM_PATH, memory)
-        workspace.commit_all(main_wt, f"rsi: carry the memory into {run_id}", paths=[".rsi"])
+        sim.save(sim_path, memory)
+        if not proj.external:
+            workspace.commit_all(main_wt, f"rsi: carry the memory into {run_id}", paths=[".rsi"])
     head = workspace.rev_parse(main_wt)
     st = RunState(
         run=run_id, project=str(project), branch=branch, base_ref=base_ref, config=cfg.to_dict(),
         benchmark=label, rounds=cfg.rounds if rounds is None else rounds,
         evolve_ids=[t["id"] for t in checked.evolve], heldout_ids=[t["id"] for t in checked.heldout],
-        start_sha=head, current_sha=head, eval_sha=head,
+        start_sha=head, current_sha=head, eval_sha=head, external=proj.external,
     )
     st.save(rl.state_file)
     _say(f"started run {run_id} on {branch} ({label}, {cfg.model})")
@@ -280,16 +301,15 @@ def _abandon(project: Path, layout: Layout, st: RunState) -> None:
 def run(project: Path, rounds: int | None = None, from_ref: str | None = None,
         promote: bool = True, new: bool = False, now: datetime | None = None) -> RunState:
     """Resume the project's unfinished run, or start one, and drive it to the end."""
-    project = workspace.repo_root(project)
-    live = config.load(project / CONFIG_PATH)
-    layout = Layout(live.name)
+    proj = projects.find(project)
+    project, layout = proj.repo, proj.layout
     with Lock(layout.lock_file):
         st = find_unfinished(layout)
         if st is not None and new:
             _abandon(project, layout, st)
             st = None
         if st is None:
-            st = _start(project, live, layout, from_ref, rounds, now or datetime.now())
+            st = _start(proj, from_ref, rounds, now or datetime.now())
         else:
             _say(f"resuming run {st.run} at round {st.round}, step {st.step}")
         ctx = _context(project, layout, st)
@@ -391,7 +411,7 @@ def _heldout_end(ctx: Ctx) -> None:
 
 def _promote(ctx: Ctx) -> None:
     st = ctx.state
-    st.promoted = promote_mod.promote(ctx.project, st, ctx.cfg, _load_sim(ctx.main_wt))
+    st.promoted = promote_mod.promote(ctx.project, st, ctx.cfg, _load_sim(ctx))
     st.step = "done"
 
 
@@ -492,7 +512,7 @@ def _ingest(ctx: Ctx) -> None:
 
 def _propose(ctx: Ctx) -> None:
     st, cfg = ctx.state, ctx.cfg
-    memory = _load_sim(ctx.main_wt)
+    memory = _load_sim(ctx)
     table = _evolve_now(ctx).table(cfg.pass_threshold)
     evidence = _read_jsonl(ctx.hist() / "evidence.jsonl")
 
@@ -558,7 +578,7 @@ def _code_screen(ctx: Ctx, c: dict, memory: dict, failing: set[str]) -> str | No
 
 def _screen(ctx: Ctx) -> None:
     st, cfg = ctx.state, ctx.cfg
-    memory = _load_sim(ctx.main_wt)
+    memory = _load_sim(ctx)
     failing = set(st.evolve_ids) - _evolve_now(ctx).passing(cfg.pass_threshold)
     for c in _with_status(ctx, "proposed"):
         reason = _code_screen(ctx, c, memory, failing)
@@ -614,7 +634,7 @@ def _select(ctx: Ctx) -> None:
     evaluated = _with_status(ctx, "evaluated")
     accept, reason = None, "no candidate reached evaluation"
     if evaluated:
-        memory = _load_sim(ctx.main_wt)
+        memory = _load_sim(ctx)
         items = []
         for c in evaluated:
             result = evaluator.evaluate(cfg, ctx.evolve, Path(c["worktree"]), ctx.rl.feedback / c["sha"], st.benchmark)
@@ -644,7 +664,7 @@ def _select(ctx: Ctx) -> None:
 
 def _append_log(ctx: Ctx, chosen: dict | None, pid: str | None, before: float, after: float) -> None:
     st = ctx.state
-    path = ctx.main_wt / LOG_PATH
+    path = ctx.log_path
     text = path.read_text() if path.is_file() else LOG_HEADER
     start = f"| {st.run} | {st.round} |"
     if start in text:
@@ -669,7 +689,7 @@ def _record(ctx: Ctx) -> None:
         chosen = next(c for c in st.candidates if c["sample"] == accept)
         after = chosen["score"]
         workspace.fast_forward(ctx.main_wt, chosen["sha"])
-        memory = _load_sim(ctx.main_wt)
+        memory = _load_sim(ctx)
         pid = sim.find_attempt(memory, st.run, st.round)
         if pid is None:
             pid = sim.record_attempt(memory, chosen["manifest"]["root_cause"], {
@@ -682,11 +702,12 @@ def _record(ctx: Ctx) -> None:
                 "score_before": before, "score_after": after,
                 "domain": {"benchmark": st.benchmark, "model": cfg.model},
             })
-            sim.save(ctx.main_wt / SIM_PATH, memory)
+            sim.save(ctx.sim_path, memory)
         problem = sim.problem(memory, pid)
         opened = (problem["opened_run"], problem["opened_round"]) == (st.run, st.round)
     _append_log(ctx, chosen, pid, before, after)
-    workspace.commit_all(ctx.main_wt, f"rsi: {st.run} round {st.round} record", paths=[".rsi"])
+    if not st.external:
+        workspace.commit_all(ctx.main_wt, f"rsi: {st.run} round {st.round} record", paths=[".rsi"])
     _write_history(ctx)
 
     st.rounds_log.append({

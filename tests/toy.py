@@ -18,7 +18,7 @@ CONFIG = """\
 [project]
 name = "toy"
 base_branch = "main"
-
+{project_extra}
 [setting]
 benchmark = "toy"
 model = "{model}"
@@ -30,7 +30,7 @@ frozen = ["classify.py", "score.py"]
 [tasks]
 rollouts = 1
 heldout = "{heldout}"
-
+{tasks_extra}
 [commands]
 run_task = {run_task}
 {optional_commands}
@@ -40,7 +40,7 @@ candidates = {candidates}
 parallel = 2
 task_timeout_s = 60
 agent_timeout_s = {agent_timeout_s}
-{agents}"""
+{budget_extra}{agents}{tail}"""
 
 
 def toml_string(text: str) -> str:
@@ -67,6 +67,11 @@ class ToyCase(unittest.TestCase):
             "ingest": None,
             "agents": True,
             "agent_timeout_s": 120,
+            "project_extra": "",   # lines for [project]
+            "tasks_extra": "",     # lines for [tasks]
+            "budget_extra": "",    # lines for [budget]
+            "agents_extra": "",    # lines for [agents]
+            "tail": "",            # whole tables appended at the end, e.g. [[constraints]] or [promotion]
         }
         values.update(settings)
         optional = ""
@@ -77,19 +82,35 @@ class ToyCase(unittest.TestCase):
         if values["agents"]:
             command = toml_string(f"{PYTHON} {shlex.quote(str(TOY / 'fake_agent.py'))} --out {{out_dir}}")
             agents = f"\n[agents]\nproposer = {command}\nselector = {command}\n"
+        if values["agents_extra"]:
+            agents = (agents or "\n[agents]\n") + values["agents_extra"].rstrip("\n") + "\n"
+        lines = lambda text: text.rstrip("\n") + "\n" if text else ""
         return CONFIG.format(
+            project_extra=lines(values["project_extra"]), tasks_extra=lines(values["tasks_extra"]),
+            budget_extra=lines(values["budget_extra"]), tail=("\n" + lines(values["tail"])) if values["tail"] else "",
             model=values["model"], heldout=values["heldout"], rounds=values["rounds"],
             candidates=values["candidates"], run_task=toml_string(values["run_task"]),
             agent_timeout_s=values["agent_timeout_s"], optional_commands=optional, agents=agents,
         )
 
-    def make_toy(self, script: str = "script.json", **settings) -> Path:
+    def write_config(self, project: Path, external: bool = False, **settings) -> Path:
+        """Write the toy's config: inside the repository, or under RSI_HOME with project.repo set."""
+        if external:
+            extra = settings.get("project_extra", "")
+            settings["project_extra"] = f"repo = {toml_string(str(project))}\n" + extra
+            path = self.home / "toy" / "config.toml"
+        else:
+            path = project / ".rsi" / "config.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.config_text(**settings))
+        return path
+
+    def make_toy(self, script: str = "script.json", external: bool = False, **settings) -> Path:
         project = self.tmp / "project"
         shutil.copytree(TOY / "project", project)
-        (project / ".rsi").mkdir()
-        (project / ".rsi" / "config.toml").write_text(self.config_text(**settings))
+        self.write_config(project, external=external, **settings)
         private = self.home / "toy" / "private"
-        private.mkdir(parents=True)
+        private.mkdir(parents=True, exist_ok=True)
         shutil.copy(TOY / "bench" / "tasks.jsonl", private / "tasks.jsonl")
         shutil.copy(TOY / "bench" / "split.json", private / "split.json")
         git(project, "init", "-q", "-b", "main")

@@ -96,6 +96,19 @@ class Layout:
     def lock_file(self) -> Path:
         return self.root / "lock"
 
+    # For a project kept outside its repository: its config, memory and log.
+    @property
+    def config_file(self) -> Path:
+        return self.root / "config.toml"
+
+    @property
+    def sim_file(self) -> Path:
+        return self.root / "sim.json"
+
+    @property
+    def log_file(self) -> Path:
+        return self.root / "log.md"
+
     def tasks_path(self, tasks_file: str | None) -> Path:
         if tasks_file:
             return Path(tasks_file).expanduser()
@@ -198,6 +211,7 @@ class RunState:
     rounds_log: list[dict] = field(default_factory=list)
     active_seconds: float = 0.0
     promoted: dict | None = None
+    external: bool = False    # the config, memory and log live under RSI_HOME, not in the repository
 
     def save(self, path: Path) -> None:
         write_json_atomic(path, asdict(self))

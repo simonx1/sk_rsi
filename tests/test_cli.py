@@ -27,6 +27,32 @@ class InitTest(CliCase):
         self.assertTrue((self.home / "My-Project" / "private").is_dir())
         self.assertIn("tasks.jsonl", out)
 
+    def test_init_external(self):
+        repo = make_repo(self.tmp / "My Project", {"README.md": "x\n"})
+        code, out, _ = self.rsi("init", "--external", "--project", repo)
+        self.assertEqual(code, 0)
+        path = self.home / "My-Project" / "config.toml"
+        self.assertIn(str(path), out)
+        self.assertFalse((repo / ".rsi").exists())
+        cfg = config.load(path)
+        self.assertEqual((cfg.name, cfg.repo), ("My-Project", str(repo)))
+        self.assertTrue((self.home / "My-Project" / "private").is_dir())
+
+    def test_init_external_with_a_name(self):
+        repo = make_repo(self.tmp / "repo", {"README.md": "x\n"})
+        self.assertEqual(self.rsi("init", "--external", "--name", "latency", "--project", repo)[0], 0)
+        self.assertEqual(config.load(self.home / "latency" / "config.toml").name, "latency")
+
+    def test_init_external_refuses_when_a_config_exists(self):
+        repo = make_repo(self.tmp / "repo", {"README.md": "x\n"})
+        self.rsi("init", "--external", "--project", repo)
+        code, _, err = self.rsi("init", "--external", "--project", repo)
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", err)
+        code, _, err = self.rsi("init", "--project", repo)
+        self.assertEqual(code, 2)
+        self.assertIn("already has a config", err)
+
     def test_refuses_to_overwrite(self):
         repo = make_repo(self.tmp / "repo", {"README.md": "x\n"})
         self.rsi("init", "--project", repo)
@@ -112,6 +138,19 @@ class RunTest(CliCase):
         code, _, err = self.rsi("run", "--project", project)
         self.assertEqual(code, 2)
         self.assertIn("not valid TOML", err)
+
+    def test_commands_work_for_an_external_project(self):
+        project = self.make_toy(external=True)
+        self.assertEqual(self.rsi("validate", "--project", project)[0], 0)
+        code, out, _ = self.rsi("run", "--no-promote", "--project", project)
+        self.assertEqual(code, 0)
+        self.assertIn("Evolve: 33.33 → 66.67 → 83.33", out)
+        self.assertIn("Evolve: 33.33 → 66.67 → 83.33", self.rsi("status", "--project", project)[1])
+        _, out, _ = self.rsi("sim", "show", "--project", project)
+        self.assertIn("P1  rules cover too few keywords per label", out)
+        code, out, _ = self.rsi("promote", "--project", project)
+        self.assertEqual(code, 0)
+        self.assertIn("the project has no git remote", out)
 
     def test_status_without_runs(self):
         project = self.make_toy()
