@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from unittest import mock
 
-from rsi import evaluator, loop, tasks
+from rsi import agents, evaluator, loop, tasks
 from rsi.state import Layout
 from tests.helpers import git
 from tests.toy import TOY, ToyCase
@@ -152,7 +152,9 @@ class TwoRoundsTest(ToyCase):
         rule = lambda verb, path: f"{verb}(//" + str(path).lstrip("/") + "/**)"
         private = Layout("toy").private
         settings = sorted(self.rl.agents.rglob("settings.json"))
-        self.assertEqual(len(settings), 10)  # 3 proposers + screen + select, in each of 2 rounds
+        # 3 proposers + screen + select in each of 2 rounds, plus the first try of round 0's s3, which
+        # left an invalid manifest and was called once more
+        self.assertEqual(len(settings), 11)
         for path in settings:
             deny = json.loads(path.read_text())["permissions"]["deny"]
             expected = [rule("Read", private), rule("Edit", private),
@@ -414,6 +416,71 @@ class ExternalFilesTest(ToyCase):
         self.assertEqual(memory["carried_from"], [
             {"run": first.run, "benchmark": "toy-v1", "model": "model-a", "into": second.run}])
         self.assertEqual(git(project, "rev-parse", second.branch), git(project, "rev-parse", first.branch))
+
+
+class AgentCallsTest(ToyCase):
+    TAMPER = "(echo x > {feedback_dir}/planted.txt; echo x > {history_dir}/planted.txt) 2>/dev/null; "
+
+    def test_shared_folders_are_read_only_while_agents_run(self):
+        project = self.make_toy(proposer_prefix=self.TAMPER, selector_prefix=self.TAMPER)
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        rl = Layout("toy").run(st.run)
+        self.assertEqual(list(rl.feedback.rglob("planted.txt")) + list(rl.history.rglob("planted.txt")), [])
+        (rl.feedback / "writable-again.txt").write_text("x")
+
+    def test_resume_restores_write_access(self):
+        project = self.make_toy()
+        with mock.patch.object(agents, "run_agent", side_effect=RuntimeError("killed")):
+            with self.assertRaises(RuntimeError):
+                loop.run(project)
+        stopped = loop.find_unfinished(Layout("toy"))
+        self.assertEqual(stopped.step, "propose")
+        rl = Layout("toy").run(stopped.run)
+        # A process killed outright leaves the folders as they were while the agents ran.
+        agents.set_writable([rl.feedback, rl.history], False)
+        self.assertFalse(os.access(rl.feedback, os.W_OK))
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+
+    def test_an_agent_that_leaves_no_output_is_called_once_more(self):
+        marks = self.tmp / "marks"
+        marks.mkdir()
+        first_call_does_nothing = (f"m={shlex.quote(str(marks))}/$RSI_ROUND-$RSI_SAMPLE; "
+                                   'if [ ! -e "$m" ]; then touch "$m"; exit 0; fi; ')
+        project = self.make_toy(proposer_prefix=first_call_does_nothing)
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        agents_dir = Layout("toy").run(st.run).agents / "round-0"
+        self.assertTrue((agents_dir / "s1.try1" / "prompt.md").is_file())
+        self.assertFalse((agents_dir / "s1.try1" / "manifest.json").exists())
+        self.assertTrue((agents_dir / "s1" / "manifest.json").is_file())
+
+    def test_a_selector_that_fails_twice_accepts_nothing(self):
+        project = self.make_toy(script="script_selector_down.json", rounds=1, candidates=1)
+        st = loop.run(project)
+        self.assertEqual(st.rounds_log[0]["reason"], "selector failed: exit code 3")
+        agents_dir = Layout("toy").run(st.run).agents / "round-0"
+        self.assertTrue((agents_dir / "select.try1").is_dir())
+        self.assertTrue((agents_dir / "screen.try1").is_dir())
+
+    def test_a_timeout_is_not_tried_again(self):
+        project = self.make_toy(rounds=1, candidates=1, agent_timeout_s=1, proposer_prefix="sleep 30; ")
+        st = loop.run(project)
+        self.assertEqual(st.rounds_log[0]["dropped"], [{"sample": "s1", "reason": "agent failed: timed out after 1s"}])
+        self.assertFalse((Layout("toy").run(st.run).agents / "round-0" / "s1.try1").exists())
+
+    def test_output_written_before_a_denied_action_counts(self):
+        denied = "; echo '{\"denied_actions\": [{\"action\": \"read_file\"}]}' > {out_dir}/agent-result.json"
+        project = self.make_toy(rounds=1, candidates=1)
+        text = (project / loop.CONFIG_PATH).read_text()
+        patched = text.replace('--out {out_dir}"\nselector', '--out {out_dir}' + denied.replace('"', '\\"') + '"\nselector', 1)
+        self.assertNotEqual(text, patched)
+        (project / loop.CONFIG_PATH).write_text(patched)
+        git(project, "commit", "-q", "-am", "a proposer that is denied after writing its manifest")
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67])
+        self.assertFalse((Layout("toy").run(st.run).agents / "round-0" / "s1.try1").exists())
 
 
 class ContinuationTest(ToyCase):

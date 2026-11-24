@@ -281,6 +281,7 @@ def _context(project: Path, layout: Layout, st: RunState) -> Ctx:
               [by_id[i] for i in st.evolve_ids], [by_id[i] for i in st.heldout_ids])
     if not ctx.main_wt.exists():
         workspace.add_worktree(project, ctx.main_wt, st.branch, st.branch)
+    agents.set_writable(_shared(ctx), True)  # a run killed while agents ran left them read-only
     st.status, st.error = "running", None
     return ctx
 
@@ -453,7 +454,9 @@ def _with_status(ctx: Ctx, status: str) -> list[dict]:
 
 
 def _call_agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str, str]) -> agents.AgentResult:
-    command = ctx.cfg.proposer if role == "proposer" else ctx.cfg.selector
+    cfg = ctx.cfg
+    command = (cfg.proposer if role == "proposer" else cfg.selector) or agents.builtin_command(
+        cfg.agent_cli, cfg.agent_model, cfg.agent_effort, cfg.agent_timeout_s)
     env = {"RSI_ROUND": str(ctx.state.round), **env}
     # Agents read the shared folders; only the framework writes them. The selector also only reads its worktree.
     readonly = [ctx.rl.feedback, ctx.rl.history] + ([cwd] if role == "selector" else [])
@@ -465,6 +468,42 @@ def _call_agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dic
         if discarded:
             _say(f"warning: the selector changed {len(discarded)} path(s) in the run branch's worktree; discarded")
     return result
+
+
+def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str, str],
+           read: Callable[[Path], object], reset: Callable[[], object] | None = None) -> tuple[object, tuple[str, str] | None]:
+    """Call an agent and read its output file; when that fails, try once more.
+
+    Returns (value, None), or (None, (kind, message)) with kind "agent" (the call failed) or "output"
+    (it left no valid output). A timeout is not tried again. Before the second try `reset` is called,
+    and the first try's folder is kept beside the new one as `<name>.try1`.
+    """
+    failure: tuple[str, str] | None = None
+    for attempt in (1, 2):
+        if attempt == 2:
+            if reset is not None:
+                reset()
+            kept = out.with_name(out.name + ".try1")
+            shutil.rmtree(kept, ignore_errors=True)
+            out.rename(kept)
+        _fresh_dir(out)
+        result = _call_agent(ctx, role, prompt, cwd, out, env)
+        if result.ok or result.denied:
+            # An agent denied an action may have finished its work first; what it wrote decides.
+            try:
+                return read(out), None
+            except agents.AgentOutputError as problem:
+                failure = ("agent", result.error) if result.denied else ("output", str(problem))
+        else:
+            failure = ("agent", result.error)
+            if result.timed_out:
+                break
+    return None, failure
+
+
+def _shared(ctx: Ctx) -> list[Path]:
+    """The folders agents read and only the framework writes."""
+    return [ctx.rl.feedback, ctx.rl.history]
 
 
 def _write_history(ctx: Ctx) -> None:
@@ -526,15 +565,22 @@ def _propose(ctx: Ctx) -> None:
     ctx.save()
 
     def call(c: dict) -> None:
-        out = _fresh_dir(ctx.agent_dir(c["sample"]))
+        out = ctx.agent_dir(c["sample"])
+        worktree = Path(c["worktree"])
         prompt = prompts.proposer_prompt(cfg, st.benchmark, memory, table, evidence, st.scores[-1],
                                          st.eval_sha, ctx.rl.feedback, ctx.rl.history, out)
-        result = _call_agent(ctx, "proposer", prompt, Path(c["worktree"]), out, {"RSI_SAMPLE": c["sample"]})
+        manifest, failure = _agent(ctx, "proposer", prompt, worktree, out, {"RSI_SAMPLE": c["sample"]},
+                                   agents.read_manifest, reset=lambda: workspace.clean(worktree))
         with ctx.lock:
-            c["agent_done"], c["agent_error"] = True, result.error
+            c["agent_done"] = True
+            if failure:
+                kind, message = failure
+                c["agent_error"] = f"agent failed: {message}" if kind == "agent" else f"invalid manifest: {message}"
+            else:
+                c["manifest"] = manifest
             ctx.save()
 
-    with ThreadPoolExecutor(max_workers=cfg.parallel) as pool:
+    with agents.read_only(_shared(ctx)), ThreadPoolExecutor(max_workers=cfg.parallel) as pool:
         try:
             list(pool.map(call, waiting))
         except (KeyboardInterrupt, SystemExit):
@@ -543,13 +589,14 @@ def _propose(ctx: Ctx) -> None:
 
     for c in _with_status(ctx, "new"):
         if c["agent_error"]:
-            _drop(c, f"agent failed: {c['agent_error']}")
+            _drop(c, c["agent_error"])
             continue
-        try:
-            c["manifest"] = agents.read_manifest(ctx.agent_dir(c["sample"]))
-        except agents.AgentOutputError as error:
-            _drop(c, f"invalid manifest: {error}")
-            continue
+        if "manifest" not in c:  # a run started before manifests were kept in the state
+            try:
+                c["manifest"] = agents.read_manifest(ctx.agent_dir(c["sample"]))
+            except agents.AgentOutputError as error:
+                _drop(c, f"invalid manifest: {error}")
+                continue
         worktree = Path(c["worktree"])
         workspace.commit_all(worktree, f"rsi: {st.run} r{st.round} {c['sample']}: {_first_line(c['manifest']['what'])}")
         c["sha"] = workspace.rev_parse(worktree)
@@ -586,22 +633,19 @@ def _screen(ctx: Ctx) -> None:
             _drop(c, reason)
     survivors = _with_status(ctx, "proposed")
     if survivors:
-        out = _fresh_dir(ctx.agent_dir("screen"))
+        out = ctx.agent_dir("screen")
         items = [
             {"sample": c["sample"], "manifest": c["manifest"], "files": c["files"],
              "diff": workspace.diff_text(ctx.project, st.current_sha, c["sha"])}
             for c in survivors
         ]
         prompt = prompts.screen_prompt(cfg, st.benchmark, memory, items, out)
-        result = _call_agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "screen"})
-        verdicts = None
-        if result.ok:
-            try:
-                verdicts = agents.read_screen(out, [c["sample"] for c in survivors])
-            except agents.AgentOutputError as error:
-                _say(f"warning: the selector's screen answer was unusable ({error}); keeping every candidate")
-        else:
-            _say(f"warning: the selector failed at screen ({result.error}); keeping every candidate")
+        samples = [c["sample"] for c in survivors]
+        with agents.read_only(_shared(ctx)):
+            verdicts, failure = _agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "screen"},
+                                       lambda folder: agents.read_screen(folder, samples))
+        if failure:
+            _say(f"warning: the selector failed at screen ({failure[1]}); keeping every candidate")
         for c in survivors:
             keep, why = verdicts[c["sample"]] if verdicts else (True, "")
             if keep:
@@ -640,17 +684,17 @@ def _select(ctx: Ctx) -> None:
             result = evaluator.evaluate(cfg, ctx.evolve, Path(c["worktree"]), ctx.rl.feedback / c["sha"], st.benchmark)
             items.append({**{k: c[k] for k in ("sample", "manifest", "files", "score", "fixed", "missed", "regressed")},
                           "table": result.table(cfg.pass_threshold)})
-        out = _fresh_dir(ctx.agent_dir("select"))
+        out = ctx.agent_dir("select")
         prompt = prompts.select_prompt(cfg, st.benchmark, memory, st.scores[-1],
                                        _evolve_now(ctx).table(cfg.pass_threshold), items, out)
-        result = _call_agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "select"})
-        if not result.ok:
-            reason = f"selector failed: {result.error}"
+        samples = [c["sample"] for c in evaluated]
+        with agents.read_only(_shared(ctx)):
+            decision, failure = _agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "select"},
+                                       lambda folder: agents.read_decision(folder, samples))
+        if failure:
+            reason = f"selector failed: {failure[1]}"
         else:
-            try:
-                accept, reason = agents.read_decision(out, [c["sample"] for c in evaluated])
-            except agents.AgentOutputError as error:
-                accept, reason = None, f"selector failed: {error}"
+            accept, reason = decision
         if accept:
             chosen = next(c for c in evaluated if c["sample"] == accept)
             if _below_tolerance(st.scores[-1], chosen["score"], cfg.tolerance):

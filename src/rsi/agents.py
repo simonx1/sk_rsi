@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import shlex
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +28,37 @@ DEFAULT_COMMAND = (
 )
 
 
+# agy takes its prompt as an argument, so it is given this short text, which names the prompt file.
+# Headless agy ends its session at once, with no reply, when it is denied an action: any shell
+# command, and any file outside its working directory and the added folders. It has no per-path
+# deny rules; what keeps it from changing the shared folders is read_only() below.
+INSTRUCTION = (
+    "Read the file {prompt_file} and follow it exactly. You are running without a person: use only your file\n"
+    "viewing and file editing tools. Never run a shell command, and never open a file outside the current\n"
+    "directory and the folders that file names. Either one ends this session at once with nothing saved.\n"
+)
+
+AGY_COMMAND = (
+    "agy --model {model}{effort} --mode accept-edits "
+    "--add-dir {{feedback_dir}} --add-dir {{history_dir}} --add-dir {{out_dir}} "
+    "--print-timeout {timeout}s --output-format json "
+    '-p "$(cat {{instruction_file}})" > {{out_dir}}/agent-result.json'
+)
+
+
+def builtin_command(cli: str, model: str | None, effort: str | None, timeout_s: int) -> str:
+    """The command template for a built-in agent. `model` and `effort` are shell-quoted here."""
+    if cli == "agy":
+        return AGY_COMMAND.format(
+            model=shlex.quote(model or ""),
+            effort=f" --effort {shlex.quote(effort)}" if effort else "",
+            timeout=int(timeout_s),
+        )
+    if model:
+        return DEFAULT_COMMAND.replace("claude -p ", f"claude -p --model {shlex.quote(model)} ", 1)
+    return DEFAULT_COMMAND
+
+
 class AgentOutputError(Exception):
     pass
 
@@ -32,6 +67,49 @@ class AgentOutputError(Exception):
 class AgentResult:
     ok: bool
     error: str | None
+    timed_out: bool = False
+    denied: bool = False   # the agent's own report says an action was denied; what it wrote before may still be valid
+
+
+_WRITE_BITS = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
+
+
+def set_writable(paths: list[Path], writable: bool) -> None:
+    """Make every file and folder under `paths` read-only on disk, or writable by the owner again."""
+    for top in paths:
+        if not top.exists():
+            continue
+        entries = [top]
+        for folder, folders, files in os.walk(top):
+            entries += [Path(folder) / name for name in folders + files]
+        for entry in entries:
+            if entry.is_symlink():
+                continue
+            mode = entry.stat().st_mode
+            entry.chmod(mode | stat.S_IWUSR if writable else mode & ~_WRITE_BITS)
+
+
+@contextlib.contextmanager
+def read_only(paths: list[Path]):
+    """While agents run, the folders they are given to read cannot be changed, whatever agent it is."""
+    set_writable(paths, False)
+    try:
+        yield
+    finally:
+        set_writable(paths, True)
+
+
+def _denied_actions(out_dir: Path) -> list[str]:
+    """Actions the agent's own result file says were denied (agy writes one; other agents do not)."""
+    try:
+        result = json.loads((out_dir / "agent-result.json").read_text())
+    except (OSError, ValueError):
+        return []
+    denied = result.get("denied_actions") if isinstance(result, dict) else None
+    if not isinstance(denied, list):
+        return []
+    names = [str(d.get("action", "unknown")) for d in denied if isinstance(d, dict)]
+    return list(dict.fromkeys(names))
 
 
 def _targets(path: Path) -> list[str]:
@@ -80,8 +158,11 @@ def run_agent(
     prompt_file.write_text(prompt)
     settings_file = out_dir / "settings.json"
     _write_settings(settings_file, deny, list(readonly))
+    instruction_file = out_dir / "instruction.txt"
+    instruction_file.write_text(INSTRUCTION.replace("{prompt_file}", str(prompt_file)))
     rendered = shell.render(command or DEFAULT_COMMAND, {
         "prompt_file": prompt_file,
+        "instruction_file": instruction_file,
         "out_dir": out_dir,
         "feedback_dir": feedback_dir,
         "history_dir": history_dir,
@@ -90,9 +171,12 @@ def run_agent(
     done = shell.run(rendered, cwd=cwd, timeout=timeout, env={"RSI_ROLE": role, **(env or {})})
     (out_dir / "agent.log").write_text(done.stdout + "\n--- stderr ---\n" + done.stderr)
     if done.timed_out:
-        return AgentResult(False, f"timed out after {timeout}s")
+        return AgentResult(False, f"timed out after {timeout}s", timed_out=True)
     if done.returncode != 0:
         return AgentResult(False, f"exit code {done.returncode}")
+    denied = _denied_actions(out_dir)
+    if denied:
+        return AgentResult(False, "the agent was denied: " + ", ".join(denied), denied=True)
     return AgentResult(True, None)
 
 

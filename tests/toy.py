@@ -72,6 +72,8 @@ class ToyCase(unittest.TestCase):
             "budget_extra": "",    # lines for [budget]
             "agents_extra": "",    # lines for [agents]
             "tail": "",            # whole tables appended at the end, e.g. [[constraints]] or [promotion]
+            "proposer_prefix": "",  # shell text run before the scripted agent, e.g. to misbehave first
+            "selector_prefix": "",
         }
         values.update(settings)
         optional = ""
@@ -80,8 +82,9 @@ class ToyCase(unittest.TestCase):
                 optional += f"{name} = {toml_string(values[name])}\n"
         agents = ""
         if values["agents"]:
-            command = toml_string(f"{PYTHON} {shlex.quote(str(TOY / 'fake_agent.py'))} --out {{out_dir}}")
-            agents = f"\n[agents]\nproposer = {command}\nselector = {command}\n"
+            fake = f"{PYTHON} {shlex.quote(str(TOY / 'fake_agent.py'))} --out {{out_dir}}"
+            agents = (f"\n[agents]\nproposer = {toml_string(values['proposer_prefix'] + fake)}\n"
+                      f"selector = {toml_string(values['selector_prefix'] + fake)}\n")
         if values["agents_extra"]:
             agents = (agents or "\n[agents]\n") + values["agents_extra"].rstrip("\n") + "\n"
         lines = lambda text: text.rstrip("\n") + "\n" if text else ""

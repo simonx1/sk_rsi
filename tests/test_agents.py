@@ -1,4 +1,5 @@
 import json
+import shlex
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +74,61 @@ class RunAgentTest(unittest.TestCase):
         for name in ("prompt_file", "out_dir", "feedback_dir", "history_dir", "settings_file"):
             self.assertIn("{" + name + "}", agents.DEFAULT_COMMAND)
         self.assertIn("--disallowedTools Bash", agents.DEFAULT_COMMAND)
+
+    def test_instruction_file_names_the_prompt(self):
+        self.assertIn(" ", str(self.out))
+        agents.run_agent("proposer", "cp {instruction_file} {out_dir}/seen.txt", "p", **self.kwargs)
+        seen = (self.out / "seen.txt").read_text()
+        self.assertTrue(seen.startswith(f"Read the file {self.out}/prompt.md and follow it exactly."), seen)
+        self.assertIn("Never run a shell command", seen)
+        self.assertIn("ends this session at once with nothing saved", seen)
+
+    def test_builtin_commands(self):
+        agy = agents.builtin_command("agy", "gemini-4-neon", "high", 1800)
+        for part in ("agy --model gemini-4-neon --effort high --mode accept-edits", "--add-dir {feedback_dir}",
+                     "--add-dir {history_dir}", "--add-dir {out_dir}", "--print-timeout 1800s",
+                     "--output-format json", '-p "$(cat {instruction_file})"', "> {out_dir}/agent-result.json"):
+            self.assertIn(part, agy)
+        self.assertNotIn("--effort", agents.builtin_command("agy", "m", None, 60))
+        self.assertEqual(agents.builtin_command("claude", None, None, 60), agents.DEFAULT_COMMAND)
+        self.assertIn("--model 'a b' ", agents.builtin_command("claude", "a b", None, 60))
+        self.assertTrue(agents.builtin_command("claude", "x", None, 60).endswith("< {prompt_file}"))
+
+    def test_denied_actions_are_reported(self):
+        write = lambda text: f"echo {shlex.quote(text)} > {{out_dir}}/agent-result.json"
+        denied = write('{"denied_actions": [{"action": "command"}, {"action": "read_file"}, {"action": "command"}]}')
+        result = agents.run_agent("proposer", denied, "p", **self.kwargs)
+        self.assertEqual((result.ok, result.error, result.denied),
+                         (False, "the agent was denied: command, read_file", True))
+        for harmless in ('{"denied_actions": null}', '{"denied_actions": []}', "not json", "[1]"):
+            self.assertEqual(agents.run_agent("proposer", write(harmless), "p", **self.kwargs),
+                             agents.AgentResult(True, None))
+
+    def test_a_timeout_is_marked(self):
+        result = agents.run_agent("proposer", "sleep 30", "p", **dict(self.kwargs, timeout=1))
+        self.assertTrue(result.timed_out)
+        self.assertFalse(agents.run_agent("proposer", "exit 4", "p", **self.kwargs).timed_out)
+
+    def test_read_only_blocks_writes_and_restores(self):
+        folder = self.tmp / "shared"
+        (folder / "sub").mkdir(parents=True)
+        (folder / "f.txt").write_text("1")
+        attempts = {
+            "rewrite a file": lambda: (folder / "f.txt").write_text("2"),
+            "create a file": lambda: (folder / "new.txt").write_text("x"),
+            "create a file in a subfolder": lambda: (folder / "sub" / "new.txt").write_text("x"),
+        }
+        with agents.read_only([folder, self.tmp / "missing"]):
+            for name, attempt in attempts.items():
+                with self.assertRaises(PermissionError, msg=name):
+                    attempt()
+            self.assertEqual((folder / "f.txt").read_text(), "1")
+        for attempt in attempts.values():
+            attempt()
+        with self.assertRaises(RuntimeError):
+            with agents.read_only([folder]):
+                raise RuntimeError("an agent step failed")
+        (folder / "after.txt").write_text("x")
 
     def test_default_command_confines_the_agent(self):
         # --restricted confines the file tools to the working directory and the added directories and
