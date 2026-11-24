@@ -850,6 +850,22 @@ class NotesTest(ToyCase):
                 self.assertIn("Rule files are read top to bottom.", self.prompt(st.run, 0, name))
         self.assertEqual(st.config["agent_notes"], str(notes))
 
+    def test_notes_in_a_config_kept_in_the_repository(self):
+        project = self.make_toy(rounds=1, agents_extra='notes = "notes.md"')
+        (project / ".rsi" / "notes.md").write_text("Rule files are read top to bottom.\n")
+        git(project, "add", "-A")
+        git(project, "commit", "-q", "-m", "notes")
+        elsewhere = self.tmp / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "notes.md").write_text("the wrong file\n")
+        cwd = os.getcwd()
+        os.chdir(elsewhere)
+        self.addCleanup(os.chdir, cwd)
+        st = loop.run(project, promote=False)
+        self.assertEqual(st.config["agent_notes"], str((project / ".rsi" / "notes.md").resolve()))
+        self.assertIn("Rule files are read top to bottom.", self.prompt(st.run, 0, "s1"))
+        self.assertNotIn("the wrong file", self.prompt(st.run, 0, "s1"))
+
     def test_a_notes_file_removed_mid_run_gives_a_warning(self):
         notes = self.home / "toy" / "notes.md"
         notes.parent.mkdir(parents=True, exist_ok=True)
@@ -990,12 +1006,12 @@ class ContinuationTest(ToyCase):
         second = loop.run(project)
         prompt = (Layout("toy").run(second.run).agents / "round-0" / "s1" / "prompt.md").read_text()
         self.assertIn("# Earlier attempts that were not kept", prompt)
-        folder = f"{first.run}/history/round-{first.rounds_log[-1]['round']}/{dropped[0]['sample']}"
-        self.assertIn(f"- {folder} ", prompt)
+        self.assertIn(f"- {first.run} round-{first.rounds_log[-1]['round']}/{dropped[0]['sample']} ", prompt)
         self.assertIn(dropped[0]["reason"][:40], prompt)
         first_prompt = (Layout("toy").run(first.run).agents / "round-1" / "s1" / "prompt.md").read_text()
-        self.assertIn(f"- {first.run}/history/round-0/", first_prompt)   # the run's own earlier rounds too
-        self.assertNotIn(f"{first.run}/history/round-1/", first_prompt)
+        self.assertIn(f"- {first.run} round-0/", first_prompt)   # the run's own earlier rounds too
+        self.assertIn("(this run)", first_prompt)
+        self.assertNotIn(f"{first.run} round-1/", first_prompt)
 
     def test_same_setting_records_no_hop(self):
         project = self.make_toy()

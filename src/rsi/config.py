@@ -269,7 +269,14 @@ def load(path: Path) -> Config:
         cfg = parse(path.read_text())
     except ConfigError as error:
         raise ConfigError(f"{path}: {error}") from None
+    return resolve_paths(cfg, path.parent)
+
+
+def resolve_paths(cfg: Config, folder: Path) -> Config:
+    """Make the config's file paths absolute, relative to `folder`, the config file's own folder.
+
+    So a path means the same file wherever rsi is started from, and after a resume.
+    """
     if cfg.agent_notes:
-        # Relative to the config's own folder, so it means the same file wherever rsi is started from.
-        cfg = replace(cfg, agent_notes=str(path.parent.resolve() / Path(cfg.agent_notes).expanduser()))
+        cfg = replace(cfg, agent_notes=str(folder.resolve() / Path(cfg.agent_notes).expanduser()))
     return cfg

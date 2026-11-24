@@ -33,7 +33,8 @@ Edits that were not kept are not in the memory, but they are not forgotten. The 
 selector, when it screens, are given a list of them from this run's earlier rounds and from earlier
 runs of the project, newest first, each with its outcome: why it was dropped, or what it scored and
 what the tasks reported. A repeat then needs new evidence. The list is read from the history folders
-and holds at most 30 edits.
+and holds at most 30 edits. Agents can open this run's history folder for the details; for an earlier
+run the line is all they get.
 
 A run works on its own branch and ends with a pull request. Nothing reaches your main branch any
 other way.
@@ -264,8 +265,8 @@ relative to the config file's folder. The text is shown to the proposer and to t
 its steps. It is read once a round, before the proposers start, so an edit reaches the next round
 without a restart. While agents work the file is read-only on disk, like the feedback and history
 folders, so nothing an agent does can change what the selector is shown. A run does not start when the
-file is missing or is one the loop may edit; if it goes missing later, the loop warns once and goes on
-without it.
+file is missing, is not UTF-8 text, or is one the loop may edit; if it cannot be read later, the loop
+warns once and goes on without it.
 
 ## Progress
 

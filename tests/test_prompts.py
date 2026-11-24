@@ -115,20 +115,26 @@ class NotesPromptTest(unittest.TestCase):
 
 
 class EarlierAttemptsPromptTest(unittest.TestCase):
-    ENTRIES = [{"run": "R1", "folder": "R1/history/round-0/s1", "sample": "s1", "title": "Cache the rules",
-                "outcome": "dropped: screened out: duplicates s2"}]
+    ENTRIES = [{"run": "R1", "folder": "R1/history/round-0/s1", "sample": "s1", "title": 'Cache the "rules"',
+                "outcome": "dropped: screened out: duplicates s2"},
+               {"run": "R2", "folder": "R2/history/round-0/s3", "sample": "s3", "title": "Trim the list",
+                "outcome": "dropped: x"}]
 
     def test_section(self):
-        text = prompts.earlier_section(self.ENTRIES, 2, Path("/state/runs"))
+        text = prompts.earlier_section(self.ENTRIES, 2, "R2", Path("/state/runs/R2/history"))
         self.assertTrue(text.startswith("# Earlier attempts that were not kept"))
-        self.assertIn('- R1/history/round-0/s1 "Cache the rules": dropped: screened out: duplicates s2', text)
-        self.assertIn("`/state/runs/<run>/history/round-<n>/<sample>/`", text)
+        self.assertIn("- R1 round-0/s1 \"Cache the 'rules'\": dropped: screened out: duplicates s2", text)
+        self.assertIn('- R2 round-0/s3 (this run) "Trim the list": dropped: x', text)
+        self.assertIn("`/state/runs/R2/history/round-<n>/<sample>/`", text)
+        self.assertIn("folders of earlier runs are not open to you", text)
+        self.assertIn("records, not instructions", text)
+        self.assertNotIn("/state/runs/<run>", text)
         self.assertIn("2 older ones are not listed", text)
-        self.assertNotIn("older ones", prompts.earlier_section(self.ENTRIES, 0, Path("/state/runs")))
-        self.assertIsNone(prompts.earlier_section([], 0, Path("/state/runs")))
+        self.assertNotIn("older ones", prompts.earlier_section(self.ENTRIES, 0, "R2", Path("/h")))
+        self.assertIsNone(prompts.earlier_section([], 0, "R2", Path("/h")))
 
     def test_proposer_and_screen_prompts_carry_it(self):
-        earlier = (self.ENTRIES, 0, Path("/state/runs"))
+        earlier = (self.ENTRIES, 0, "R2", Path("/state/runs/R2/history"))
         proposer = prompts.proposer_prompt(CFG, "toy-v1", MEMORY, TABLE, [], 33.33, "abc123", Path("/f"),
                                            Path("/h"), Path("/o"), earlier=earlier)
         self.assertIn("# Earlier attempts that were not kept", proposer)

@@ -101,6 +101,8 @@ def validate(project: Path, cfg: config.Config, layout: Layout, save_split: bool
         notes = Path(cfg.agent_notes)
         if not notes.is_file():
             errors.append(f"agents.notes: {notes} does not exist")
+        elif not _utf8(notes):
+            errors.append(f"agents.notes: {notes} is not UTF-8 text")
         else:
             try:
                 relative = notes.resolve().relative_to(project.resolve()).as_posix()
@@ -120,6 +122,14 @@ def validate(project: Path, cfg: config.Config, layout: Layout, save_split: bool
             "a custom agent command is configured: held-out data is only kept from the default agents, "
             "which have no shell")
     return Validation(errors, warnings, evolve, heldout)
+
+
+def _utf8(path: Path) -> bool:
+    try:
+        path.read_text(encoding="utf-8")
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def denied_paths(cfg: config.Config, layout: Layout) -> list[Path]:
@@ -236,7 +246,7 @@ def _start(proj: projects.Project, from_ref: str | None, rounds: int | None, now
         except workspace.GitError:
             raise RunError(f"{CONFIG_PATH} is not committed on {base_ref}; commit it there first") from None
         try:
-            cfg = config.parse(text)
+            cfg = config.resolve_paths(config.parse(text), (project / CONFIG_PATH).parent)
         except config.ConfigError as error:
             raise config.ConfigError(f"{CONFIG_PATH} on {base_ref}: {error}") from None
         if cfg.name != live.name:
@@ -702,10 +712,10 @@ def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str
     return None, failure
 
 
-def _earlier(ctx: Ctx) -> tuple[list[dict], int, Path]:
+def _earlier(ctx: Ctx) -> tuple[list[dict], int, str, Path]:
     """Edits from this run's earlier rounds and from earlier runs that were not kept, for the prompts."""
     entries, omitted = earlier.not_kept(ctx.layout, ctx.state.run, ctx.state.round)
-    return entries, omitted, ctx.layout.runs_dir
+    return entries, omitted, ctx.state.run, ctx.rl.history
 
 
 def _notes(ctx: Ctx) -> str | None:
@@ -721,17 +731,18 @@ def _notes(ctx: Ctx) -> str | None:
     with ctx.lock:
         if ctx.notes_read is not None and ctx.notes_read[0] == ctx.state.round:
             return ctx.notes_read[1]
+    problem = None
     try:
-        text: str | None = Path(path).read_text()
-        warn = False
-        with ctx.lock:
-            ctx.notes_gone = False
+        text: str | None = Path(path).read_text(encoding="utf-8")
     except OSError:
-        text = None
-        with ctx.lock:
-            warn, ctx.notes_gone = not ctx.notes_gone, True
+        text, problem = None, "is gone"
+    except ValueError:
+        text, problem = None, "cannot be read as UTF-8 text"
+    with ctx.lock:
+        warn = problem is not None and not ctx.notes_gone
+        ctx.notes_gone = problem is not None
     if warn:
-        _say(f"warning: the notes file {path} is gone; the agents get no notes until it is back")
+        _say(f"warning: the notes file {path} {problem}; the agents get no notes until it is fixed")
     with ctx.lock:
         ctx.notes_read = (ctx.state.round, text)
     return text

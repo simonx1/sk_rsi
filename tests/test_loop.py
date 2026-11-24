@@ -75,6 +75,24 @@ class ValidateTest(ToyCase):
         missing.write_text("Never touch the deploy task.\n")
         self.assertEqual(loop.validate(self.project, replace(self.cfg, agent_notes=str(missing)), self.layout).errors, [])
 
+    def test_notes_file_must_be_utf8_text(self):
+        notes = self.tmp / "notes.md"
+        notes.write_bytes(b"caf\xe9\n")
+        v = loop.validate(self.project, replace(self.cfg, agent_notes=str(notes)), self.layout)
+        self.assertEqual(v.errors, [f"agents.notes: {notes} is not UTF-8 text"])
+
+    def test_notes_that_turn_unreadable_mid_run_give_a_warning(self):
+        import io, threading, types
+        from unittest import mock
+        notes = self.tmp / "notes.md"
+        notes.write_bytes(b"caf\xe9\n")
+        ctx = types.SimpleNamespace(cfg=replace(self.cfg, agent_notes=str(notes)), lock=threading.Lock(),
+                                    state=types.SimpleNamespace(round=1), notes_read=None, notes_gone=False)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            self.assertIsNone(loop._notes(ctx))
+        self.assertIn(f"warning: the notes file {notes} cannot be read", err.getvalue())
+
     def test_notes_file_the_loop_may_edit_is_refused(self):
         editable = self.project / "rules.txt"
         v = loop.validate(self.project, replace(self.cfg, agent_notes=str(editable)), self.layout)

@@ -66,6 +66,40 @@ class NotKeptTest(unittest.TestCase):
              "guard: s3 was measured again: it gained 1.00 points, less than the 2.50 required; ci: wall 610 s"),
         ])
 
+    def test_a_round_that_compared_nothing_says_so(self):
+        self.candidate("R1", 0, "s1", status="evaluated", score=75.0, observed={})
+        self.decide("R1", 0, None, "the round's baseline had failed runs; nothing can be compared")
+        self.candidate("R1", 1, "s1", status="evaluated", score=70.0, observed={})
+        self.decide("R1", 1, None, "selector failed: the agent timed out")
+        self.candidate("R1", 2, "s1", status="evaluated", score=60.0, observed={})
+        self.decide("R1", 2, None, "s1 is no better; long free text from the selector")
+        found = {f: o for f, _, o in self.outcomes()[0]}
+        self.assertEqual(found["R1/history/round-0/s1"],
+                         "scored 75.00; not compared: the round's baseline had failed runs; nothing can be compared")
+        self.assertEqual(found["R1/history/round-1/s1"], "scored 70.00; not compared: selector failed: the agent timed out")
+        self.assertEqual(found["R1/history/round-2/s1"], "scored 60.00")
+
+    def test_damaged_history_never_stops_a_round(self):
+        self.candidate("R1", 0, "s1", status="evaluated", score=50.0, observed=7, table=5)
+        self.candidate("R1", 0, "s2", status="dropped", reason=["not", "text"])
+        self.candidate("R1", 0, "s3", raw_result="[" * 100000 + "]" * 100000)
+        self.decide("R1", 0, None)
+        path = self.layout.run("R1").state_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"rounds_log": null}')
+        self.candidate("R2", 0, "s1", status="evaluated", score=40.0)
+        (self.layout.run("R2").history / "round-0" / "decision.json").write_text("[]")
+        self.candidate("R3", 0, "s1", status="dropped", reason="fine")
+        locked = self.layout.run("R3").history / "round-0"
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        found = {f: o for f, _, o in self.outcomes("R9")[0]}
+        self.assertEqual(found["R1/history/round-0/s1"], "scored 50.00")
+        self.assertEqual(found["R1/history/round-0/s2"], "dropped: ['not', 'text']")
+        self.assertEqual(found["R2/history/round-0/s1"], "scored 40.00; the run stopped before this round was decided")
+        self.assertNotIn("R1/history/round-0/s3", found)
+        self.assertNotIn("R3/history/round-0/s1", found)
+
     def test_failing_task_notes_come_first_and_at_most_three(self):
         rows = [{"task": f"t{n}", "passes": n % 2 == 0, "summary": f"note {n}"} for n in range(1, 7)]
         rows.append({"task": "t9", "passes": False, "summary": ""})
