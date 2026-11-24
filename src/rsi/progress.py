@@ -6,8 +6,13 @@ Its content is a template with named fields, set under [progress] in a project's
 from __future__ import annotations
 
 import re
+import shutil
 import string
+import sys
+import threading
+import time
 from dataclasses import dataclass, field
+from typing import Callable, TextIO
 
 DEFAULT_LINE = ("round {round}/{rounds} · {step} · runs {done}/{total}, {failed} failed · agents {agents} · "
                 "score {score} · {step_elapsed} in step, {elapsed} total, ~{eta} left")
@@ -102,3 +107,103 @@ def eta_seconds(runs_left: int, run_seconds: list[float], parallel: int,
     runs = runs_left * (sum(run_seconds) / len(run_seconds)) / max(parallel, 1)
     agents = agent_rounds_left * (sum(agent_seconds) / len(agent_seconds)) if agent_seconds else 0.0
     return runs + agents
+
+
+CLEAR = "\r\x1b[K"   # back to the start of the line, and erase it
+
+
+class Printer:
+    """Prints the live line and the permanent lines above it.
+
+    On a terminal the live line is rewritten in place every `interval_s`; otherwise (a log file, nohup)
+    it is printed as an ordinary line every `log_interval_s`, so a log carries no control characters.
+    """
+
+    def __init__(self, stream: TextIO, line: str, events: str, interval_s: float, log_interval_s: float,
+                 snapshot: Callable[[], Snapshot], clock: Callable[[], float] = time.monotonic,
+                 width: int | None = None):
+        self.stream, self.line, self.events = stream, line, events
+        self.interval_s, self.log_interval_s = interval_s, log_interval_s
+        self.snapshot, self.clock, self.width = snapshot, clock, width
+        self.tty = bool(getattr(stream, "isatty", lambda: False)())
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_log: float | None = None
+
+    def _text(self) -> str:
+        try:
+            return render(self.line, self.snapshot())
+        except Exception as error:  # the progress line must never stop a run
+            return f"progress unavailable: {error}"
+
+    def _draw(self) -> None:
+        width = self.width or max(shutil.get_terminal_size().columns - 1, 20)
+        self.stream.write(CLEAR + self._text()[:width])
+        self.stream.flush()
+
+    def tick(self, force: bool = False) -> None:
+        with self._lock:
+            if self.tty:
+                self._draw()
+                return
+            now = self.clock()
+            if force or self._last_log is None or now - self._last_log >= self.log_interval_s:
+                self.stream.write(f"[rsi] {self._text()}\n")
+                self.stream.flush()
+                self._last_log = now
+
+    def say(self, text: str) -> None:
+        """A line that stays."""
+        with self._lock:
+            if self.tty:
+                self.stream.write(CLEAR + text + "\n")
+                self._draw()
+            else:
+                self.stream.write(text + "\n")
+                self.stream.flush()
+
+    def event(self, text: str, failure: bool) -> None:
+        """A finished task run or agent call, kept or dropped by the `events` setting."""
+        if self.events == "all" or (self.events == "failures" and failure):
+            self.say(text)
+
+    def start(self) -> None:
+        self._stop.clear()
+        self.tick()
+
+        def loop() -> None:
+            while not self._stop.wait(self.interval_s):
+                self.tick()
+
+        self._thread = threading.Thread(target=loop, name="rsi-progress", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+        with self._lock:
+            if self.tty:
+                self.stream.write(CLEAR)  # leave the cursor on an empty line
+                self.stream.flush()
+
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+
+_installed: Printer | None = None
+
+
+def install(printer: Printer | None) -> None:
+    global _installed
+    _installed = printer
+
+
+def say(text: str) -> None:
+    """Print a line that stays: above the live line when one is shown, else plainly to stderr."""
+    if _installed is not None:
+        _installed.say(text)
+    else:
+        print(text, file=sys.stderr, flush=True)

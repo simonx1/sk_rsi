@@ -1,6 +1,26 @@
+import io
+import time
 import unittest
+from unittest import mock
 
 from rsi import progress
+
+
+class FakeStream(io.StringIO):
+    def __init__(self, tty):
+        super().__init__()
+        self.tty = tty
+
+    def isatty(self):
+        return self.tty
+
+
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
 
 
 class FormatTest(unittest.TestCase):
@@ -51,3 +71,77 @@ class EtaTest(unittest.TestCase):
         self.assertEqual(progress.eta_seconds(16, [600], 4, 2, []), 2400)
         self.assertIsNone(progress.eta_seconds(16, [], 4, 2, [600]))
         self.assertEqual(progress.eta_seconds(0, [600], 4, 0, [600]), 0)
+
+
+class PrinterTest(unittest.TestCase):
+    def make(self, tty, events="all", width=200, line="{step} {done}/{total}"):
+        self.stream, self.clock = FakeStream(tty), Clock()
+        self.snap = progress.Snapshot(run="r1", step="measuring", done=1, total=4)
+        return progress.Printer(self.stream, line, events, 5, 300, lambda: self.snap, clock=self.clock, width=width)
+
+    def test_terminal_redraws_in_place_and_keeps_permanent_lines(self):
+        printer = self.make(tty=True)
+        printer.tick()
+        self.assertEqual(self.stream.getvalue(), "\r\x1b[Kmeasuring 1/4")
+        self.snap.done = 2
+        printer.say("[rsi] step started")
+        self.assertEqual(self.stream.getvalue(),
+                         "\r\x1b[Kmeasuring 1/4\r\x1b[K[rsi] step started\n\r\x1b[Kmeasuring 2/4")
+
+    def test_line_is_cut_to_the_terminal_width(self):
+        printer = self.make(tty=True, width=5)
+        printer.tick()
+        self.assertEqual(self.stream.getvalue(), "\r\x1b[Kmeasu")
+
+    def test_log_output_has_no_control_characters(self):
+        printer = self.make(tty=False)
+        printer.tick()
+        self.clock.now = 100
+        printer.tick()
+        self.clock.now = 301
+        printer.tick()
+        printer.say("[rsi] step started")
+        printer.tick(force=True)
+        text = self.stream.getvalue()
+        self.assertEqual(text, "[rsi] measuring 1/4\n[rsi] measuring 1/4\n[rsi] step started\n[rsi] measuring 1/4\n")
+        self.assertNotIn("\r", text)
+        self.assertNotIn("\x1b", text)
+
+    def test_event_levels(self):
+        for events, kept in (("all", ["ok", "bad"]), ("failures", ["bad"]), ("none", [])):
+            with self.subTest(events=events):
+                printer = self.make(tty=False, events=events)
+                printer.event("ok", failure=False)
+                printer.event("bad", failure=True)
+                self.assertEqual(self.stream.getvalue().splitlines(), kept)
+
+    def test_stop_leaves_a_fresh_line(self):
+        printer = self.make(tty=True)
+        printer.interval_s = 0.01
+        printer.start()
+        time.sleep(0.05)
+        printer.stop()
+        self.assertTrue(self.stream.getvalue().endswith("\r\x1b[K"))
+        self.assertFalse(printer.running())
+
+    def test_a_bad_snapshot_does_not_stop_the_run(self):
+        printer = self.make(tty=False)
+        printer.snapshot = lambda: 1 / 0
+        printer.tick(force=True)
+        self.assertIn("progress unavailable", self.stream.getvalue())
+
+    def test_module_say_without_a_printer(self):
+        progress.install(None)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            progress.say("[rsi] x")
+        self.assertEqual(err.getvalue(), "[rsi] x\n")
+
+    def test_module_say_with_a_printer(self):
+        printer = self.make(tty=False)
+        progress.install(printer)
+        try:
+            progress.say("[rsi] x")
+        finally:
+            progress.install(None)
+        self.assertEqual(self.stream.getvalue(), "[rsi] x\n")
