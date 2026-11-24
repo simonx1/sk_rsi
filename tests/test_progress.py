@@ -25,8 +25,9 @@ class Clock:
 
 class FormatTest(unittest.TestCase):
     def test_duration(self):
-        self.assertEqual([progress.duration(s) for s in (0, 45, 59.9, 60, 2280, 3600, 15120)],
-                         ["0s", "45s", "59s", "1m", "38m", "1h00m", "4h12m"])
+        # Seconds under an hour, so a step's time visibly moves; minutes after that.
+        self.assertEqual([progress.duration(s) for s in (0, 45, 59.9, 60, 692, 2280, 3599, 3600, 15120)],
+                         ["0s", "45s", "59s", "1m00s", "11m32s", "38m00s", "59m59s", "1h00m", "4h12m"])
 
     def test_default_template_is_valid(self):
         progress.check_template(progress.DEFAULT_LINE)
@@ -42,7 +43,7 @@ class FormatTest(unittest.TestCase):
                                  elapsed=2280, step="measuring")
         self.assertEqual(progress.render("{score:.1f}|{round:d}|{round:>3}|{metric.wall_s:.0f}|{limit.cost_usd:.1f}|"
                                          "{step:>10}|{elapsed:>5}", snap),
-                         "61.2|2|  2|636|6.0| measuring|  38m")
+                         "61.2|2|  2|636|6.0| measuring|38m00s")
         empty = progress.Snapshot(run="r1")
         self.assertEqual(progress.render("{score:.1f} {metric.x:.0f} {eta:>3}", empty), "- -   ?")
         for line in ("{score:.1f}", "{round:d}", "{metric.wall_s:.0f}", "{elapsed:>8}"):
@@ -59,14 +60,15 @@ class FormatTest(unittest.TestCase):
 
     def test_render(self):
         snap = progress.Snapshot(run="r1", status="running", round=2, rounds=5, step="measuring", done=9, total=16,
-                                 failed=1, agents_running=0, agents_total=0, errors=3, accepted=1, score=61.2,
+                                 running=4, failed=1, agents_running=0, agents_total=0, errors=3, accepted=1, score=61.2,
                                  start_score=50.0, metrics={"wall_s": 636.0}, limits={"cost_usd": 6.0},
                                  elapsed=15120, step_elapsed=2280, eta=25500)
-        line = progress.render("round {round}/{rounds} · {step} · runs {done}/{total}, {failed} failed · agents {agents} · "
+        line = progress.render("round {round}/{rounds} · {step} · runs {done}/{total}, {running} running, {failed} failed · agents {agents} · "
                                "score {score} (start {start_score}) · {metric.wall_s} · {limit.cost_usd} · "
                                "{step_elapsed} in step, {elapsed} total, ~{eta} left · {errors} errors, {accepted} kept", snap)
-        self.assertEqual(line, "round 2/5 · measuring · runs 9/16, 1 failed · agents - · score 61.20 (start 50.00) · "
-                               "636.00 · +6.00% · 38m in step, 4h12m total, ~7h05m left · 3 errors, 1 kept")
+        self.assertEqual(line, "round 2/5 · measuring · runs 9/16, 4 running, 1 failed · agents - · score 61.20 (start 50.00) · "
+                               "636.00 · +6.00% · 38m00s in step, 4h12m total, ~7h05m left · 3 errors, 1 kept")
+        self.assertIn("{running} running", progress.DEFAULT_LINE)
 
     def test_agents_running(self):
         snap = progress.Snapshot(run="r1", agents_running=2, agents_total=3)
@@ -78,7 +80,7 @@ class FormatTest(unittest.TestCase):
 
     def test_default_line_renders(self):
         line = progress.render(progress.DEFAULT_LINE, progress.Snapshot(run="r1", round=1, rounds=5, step="baseline"))
-        self.assertIn("round 1/5 · baseline · runs 0/0, 0 failed", line)
+        self.assertIn("round 1/5 · baseline · runs 0/0, 0 running, 0 failed", line)
 
 
 class EtaTest(unittest.TestCase):
@@ -88,6 +90,20 @@ class EtaTest(unittest.TestCase):
         self.assertEqual(progress.eta_seconds(16, [600], 4, 6, []), 2400)
         self.assertIsNone(progress.eta_seconds(16, [], 4, 6, [600]))
         self.assertEqual(progress.eta_seconds(0, [600], 4, 0, [600]), 0)
+
+    def test_tracker_counts_runs_in_flight(self):
+        tracker = progress.Tracker(clock=Clock())
+        tracker.begin_step("measuring", 0, agent_step=False)
+        tracker.expect(runs=4)
+        tracker.run_started()
+        tracker.run_started()
+        self.assertEqual((tracker.running, tracker.done), (2, 0))
+        tracker.run_finished(error=False, cached=False, seconds=600)
+        self.assertEqual((tracker.running, tracker.done), (1, 1))
+        tracker.run_finished(error=False, cached=True, seconds=0)     # read back from disk: it never started
+        self.assertEqual((tracker.running, tracker.done), (1, 2))
+        tracker.begin_step("selecting", 0, agent_step=True)
+        self.assertEqual(tracker.running, 0)
 
     def test_tracker_keeps_each_finished_agent_step(self):
         clock = Clock()

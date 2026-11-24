@@ -918,9 +918,20 @@ class ProgressTest(ToyCase):
         self.assertIn("[rsi] round 1 · measuring · s1 · t03 run 1/1: score 1.00 in", text)
         self.assertIn("[rsi] round 1 · proposer s1: done in", text)
         self.assertIn("[rsi] round 1 · selector (select): done in", text)
-        self.assertIn("[rsi] round 1/1 · measuring · runs 0/6, 0 failed", text)  # the live line, printed at step start
+        self.assertIn("[rsi] round 1/1 · measuring · runs 0/6, 0 running, 0 failed", text)  # the live line, at step start
         self.assertIn("[rsi] round 0/1 · baseline · runs 0/6", text)
         self.assertNotIn("\r", text)
+
+    def test_runs_in_flight_show_while_a_batch_runs(self):
+        from tests.toy import PYTHON
+        project = self.make_toy(rounds=1, run_task=f"sleep 1; {PYTHON} score.py {{task_file}} {{checkout}} {{out}}",
+                                tail='[progress]\ninterval_s = 0.2\nlog_interval_s = 0.3\nevents = "none"')
+        st, text = self.run_capturing(project, promote=False)
+        measuring = [line for line in text.splitlines() if line.startswith("[rsi] round 1/1 · measuring · runs")]
+        counts = {int(re.search(r", (\d+) running,", line).group(1)) for line in measuring}
+        self.assertTrue(counts & {1, 2}, measuring)          # parallel = 2: one or two runs under way
+        self.assertLessEqual(max(counts), 2)
+        self.assertRegex(text, r"[1-9]s in step")             # seconds visibly move inside a step
 
     def test_failures_only(self):
         fail_file = self.tmp / "fail"

@@ -15,10 +15,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, TextIO
 
-DEFAULT_LINE = ("round {round}/{rounds} · {step} · runs {done}/{total}, {failed} failed · agents {agents} · "
+DEFAULT_LINE = ("round {round}/{rounds} · {step} · runs {done}/{total}, {running} running, {failed} failed · agents {agents} · "
                 "score {score} · {step_elapsed} in step, {elapsed} total, ~{eta} left")
 
-FIELDS = frozenset({"run", "status", "round", "rounds", "step", "done", "total", "failed", "agents", "errors",
+FIELDS = frozenset({"run", "status", "round", "rounds", "step", "done", "total", "running", "failed", "agents", "errors",
                     "accepted", "score", "start_score", "elapsed", "step_elapsed", "eta"})
 GROUPS = ("metric", "limit")
 NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -44,7 +44,7 @@ def check_template(line: str) -> None:
             raise ValueError(f"unknown field {name or '{}'} in progress.line")
         if dot:
             named[group][rest] = 1.0
-    filled = Snapshot(run="r", round=1, rounds=2, done=1, total=2, failed=1, agents_running=1, agents_total=2,
+    filled = Snapshot(run="r", round=1, rounds=2, done=1, total=2, running=1, failed=1, agents_running=1, agents_total=2,
                       errors=1, accepted=1, score=1.0, start_score=1.0, metrics=named["metric"],
                       limits=named["limit"], elapsed=1.0, step_elapsed=1.0, eta=1.0)
     for snap in (Snapshot(run="r"), filled):
@@ -55,12 +55,12 @@ def check_template(line: str) -> None:
 
 
 def duration(seconds: float) -> str:
-    """45s, 38m, 4h12m."""
+    """45s, 11m32s, 4h12m: seconds under an hour, so a running step's time visibly moves."""
     seconds = int(max(seconds, 0))
     if seconds < 60:
         return f"{seconds}s"
     if seconds < 3600:
-        return f"{seconds // 60}m"
+        return f"{seconds // 60}m{seconds % 60:02d}s"
     return f"{seconds // 3600}h{seconds % 3600 // 60:02d}m"
 
 
@@ -74,6 +74,7 @@ class Snapshot:
     step: str = "starting"
     done: int = 0
     total: int = 0
+    running: int = 0        # task runs of the step started and not finished
     failed: int = 0
     agents_running: int = 0
     agents_total: int = 0
@@ -124,7 +125,8 @@ def render(line: str, snap: Snapshot) -> str:
     values = {
         "run": _Value(snap.run), "status": _Value(snap.status), "step": _Value(snap.step),
         "round": _Value(snap.round), "rounds": _Value(snap.rounds), "done": _Value(snap.done),
-        "total": _Value(snap.total), "failed": _Value(snap.failed), "errors": _Value(snap.errors),
+        "total": _Value(snap.total), "running": _Value(snap.running), "failed": _Value(snap.failed),
+        "errors": _Value(snap.errors),
         "accepted": _Value(snap.accepted),
         "agents": _Value(f"{snap.agents_running}/{snap.agents_total}" if snap.agents_total else None),
         "score": number(snap.score), "start_score": number(snap.start_score),
@@ -276,7 +278,7 @@ class Tracker:
         self._lock = threading.Lock()
         self.step = "starting"
         self.step_started = clock()
-        self.done = self.total = self.failed = 0
+        self.done = self.total = self.failed = self.running = 0
         self.agents_running = self.agents_total = 0
         self.errors = 0
         self.run_seconds: list[float] = []
@@ -291,7 +293,7 @@ class Tracker:
             if self._agent_step and self.agents_total:
                 self.agent_step_seconds.append(now - self.step_started)
             self.step, self._round, self._agent_step, self.step_started = word, round_no, agent_step, now
-            self.done = self.total = self.failed = 0
+            self.done = self.total = self.failed = self.running = 0
             self.agents_running = self.agents_total = 0
 
     def expect(self, runs: int = 0, agents: int = 0) -> None:
@@ -299,9 +301,15 @@ class Tracker:
             self.total += runs
             self.agents_total += agents
 
+    def run_started(self) -> None:
+        with self._lock:
+            self.running += 1
+
     def run_finished(self, error: bool, cached: bool, seconds: float) -> None:
         with self._lock:
             self.done += 1
+            if not cached:   # a result read back from disk was never started
+                self.running = max(self.running - 1, 0)
             if error:
                 self.failed += 1
                 self.errors += 1

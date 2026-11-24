@@ -68,7 +68,7 @@ max_infra_failure_rate = 0.3
 
 # The live progress line while `rsi run` works; see "Progress" in the README for the fields.
 # [progress]
-# line = "round {round}/{rounds} · {step} · runs {done}/{total}, {failed} failed · ~{eta} left"
+# line = "round {round}/{rounds} · {step} · runs {done}/{total}, {running} running · ~{eta} left"
 # events = "all"             # or "failures", "none"
 
 [promotion]

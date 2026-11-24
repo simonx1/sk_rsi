@@ -197,12 +197,14 @@ def evaluate_many(
     benchmark: str,
     current: set[str] | frozenset[str] = frozenset(),
     on_done: Callable[[str, Rollout, bool], None] | None = None,
+    on_start: Callable[[str], None] | None = None,
 ) -> dict[str, EvalResult]:
     """Score several checkouts at once, at most cfg.parallel rollouts at a time.
 
     `targets` maps a name to (checkout, results_dir); the targets named in `current` are the version
     the loop holds now. `on_done(target, rollout, cached)` is called as each task run finishes;
-    `cached` is True for a result read back from an earlier run.
+    `cached` is True for a result read back from an earlier run. `on_start(target)` is called as a
+    task run that is not cached starts, in the thread that runs it.
     """
     collected: dict[str, list[Rollout]] = {name: [] for name in targets}
     pool = ThreadPoolExecutor(max_workers=cfg.parallel)
@@ -215,7 +217,8 @@ def evaluate_many(
                 for name, (checkout, results_dir) in targets.items():
                     out_dir = results_dir / task["id"] / f"r{k}"
                     cached = (out_dir / MARKER).is_file()
-                    future = pool.submit(run_rollout, cfg, task, k, checkout, out_dir, benchmark, name in current)
+                    future = pool.submit(_started, None if cached else on_start, name,
+                                         run_rollout, cfg, task, k, checkout, out_dir, benchmark, name in current)
                     futures[future] = (name, cached)
         for future in as_completed(futures):
             name, cached = futures[future]
@@ -242,7 +245,18 @@ def evaluate_many(
     return results
 
 
+def _started(on_start: Callable[[str], None] | None, name: str, work: Callable, *args) -> Rollout:
+    """Report a task run as started when a worker takes it up, then run it."""
+    if on_start is not None:
+        try:
+            on_start(name)
+        except Exception:
+            pass  # progress reporting must never stop a measurement
+    return work(*args)
+
+
 def evaluate(cfg: Config, task_list: list[dict], checkout: Path, results_dir: Path, benchmark: str,
-             current: bool = False, on_done: Callable[[str, Rollout, bool], None] | None = None) -> EvalResult:
+             current: bool = False, on_done: Callable[[str, Rollout, bool], None] | None = None,
+             on_start: Callable[[str], None] | None = None) -> EvalResult:
     return evaluate_many(cfg, task_list, {"only": (checkout, results_dir)}, benchmark,
-                         current={"only"} if current else frozenset(), on_done=on_done)["only"]
+                         current={"only"} if current else frozenset(), on_done=on_done, on_start=on_start)["only"]

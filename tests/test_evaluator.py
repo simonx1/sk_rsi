@@ -260,6 +260,25 @@ class EvaluateTest(unittest.TestCase):
                                 on_done=lambda target, rollout, cached: again.append(cached))
         self.assertEqual(again, [True] * 4)
 
+    def test_on_start_is_called_before_each_run_that_really_runs(self):
+        events, lock = [], threading.Lock()
+        def log(kind):
+            def record(target, *rest):
+                with lock:
+                    events.append((kind, target))
+            return record
+        task_list = [{"id": "a", "score": 1}, {"id": "b", "score": 0}]
+        evaluator.evaluate_many(self.cfg, task_list, {"x": (self.checkout, self.results)}, "bench-v1",
+                                on_start=log("start"), on_done=log("done"))
+        self.assertEqual(sorted(events), [("done", "x")] * 4 + [("start", "x")] * 4)
+        for n in range(1, 5):   # by any point, at least as many runs have started as have finished
+            prefix = events[:n]
+            self.assertGreaterEqual(prefix.count(("start", "x")), prefix.count(("done", "x")))
+        events.clear()
+        evaluator.evaluate_many(self.cfg, task_list, {"x": (self.checkout, self.results)}, "bench-v1",
+                                on_start=log("start"), on_done=log("done"))
+        self.assertEqual(events, [("done", "x")] * 4)        # all read back from disk: none started
+
     def test_old_marker_has_zero_seconds(self):
         marker = self.results / "a" / "r1" / "rollout.json"
         marker.parent.mkdir(parents=True)

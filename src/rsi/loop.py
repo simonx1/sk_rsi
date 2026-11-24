@@ -406,7 +406,7 @@ def _snapshot(ctx: Ctx) -> progress.Snapshot:
     scores = list(st.scores)
     return progress.Snapshot(
         run=st.run, status=st.status, round=_round_shown(st), rounds=st.rounds, step=tr.step,
-        done=tr.done, total=tr.total, failed=tr.failed, agents_running=tr.agents_running,
+        done=tr.done, total=tr.total, running=tr.running, failed=tr.failed, agents_running=tr.agents_running,
         agents_total=tr.agents_total, errors=tr.errors,
         accepted=sum(1 for entry in list(st.rounds_log) if entry.get("accepted")),
         score=scores[-1] if scores else None, start_score=scores[0] if scores else None,
@@ -424,6 +424,11 @@ def _expect(ctx: Ctx, runs: int = 0, agents: int = 0) -> None:
 
 def _target_label(name: str) -> str:
     return {BASELINE: "current", "only": "current"}.get(name, name)
+
+
+def _progress(ctx: Ctx) -> dict:
+    """The callbacks that keep the progress line's task-run counts."""
+    return {"on_done": _on_done(ctx), "on_start": lambda target: ctx.tracker.run_started()}
 
 
 def _on_done(ctx: Ctx):
@@ -487,7 +492,7 @@ def _evolve_now(ctx: Ctx, counted: bool = False) -> evaluator.EvalResult:
     if counted:
         _expect(ctx, runs=len(ctx.evolve) * ctx.cfg.rollouts)
     return evaluator.evaluate(ctx.cfg, ctx.evolve, ctx.main_wt, ctx.rl.feedback / _eval_dir(st), st.benchmark,
-                              current=True, on_done=_on_done(ctx) if counted else None)
+                              current=True, **(_progress(ctx) if counted else {}))
 
 
 def _eval_dir(st: RunState) -> str:
@@ -499,7 +504,7 @@ def _heldout_now(ctx: Ctx) -> evaluator.EvalResult:
     st = ctx.state
     _expect(ctx, runs=len(ctx.heldout) * ctx.cfg.rollouts)
     return evaluator.evaluate(ctx.cfg, ctx.heldout, ctx.main_wt, ctx.rl.heldout / st.eval_sha, st.benchmark,
-                              current=True, on_done=_on_done(ctx))
+                              current=True, **_progress(ctx))
 
 
 def _stop_if_evaluator_is_broken(ctx: Ctx, result: evaluator.EvalResult, what: str) -> None:
@@ -588,7 +593,7 @@ def _heldout_paired(ctx: Ctx) -> None:
         targets = {"start": (start_wt, ctx.rl.heldout / "end-start"), **targets}
     _expect(ctx, runs=len(targets) * len(ctx.heldout) * ctx.cfg.rollouts)
     results = evaluator.evaluate_many(ctx.cfg, ctx.heldout, targets, st.benchmark, current=set(targets),
-                                      on_done=_on_done(ctx))
+                                      **_progress(ctx))
     workspace.remove_worktree(ctx.project, start_wt)
     final = results["final"]
     start = results.get("start", final)
@@ -924,7 +929,7 @@ def _evaluate(ctx: Ctx) -> None:
         targets = {BASELINE: (ctx.main_wt, ctx.rl.feedback / fresh), **targets}
     _expect(ctx, runs=len(targets) * len(ctx.evolve) * ctx.cfg.rollouts)
     results = (evaluator.evaluate_many(ctx.cfg, ctx.evolve, targets, st.benchmark, current={BASELINE},
-                                       on_done=_on_done(ctx)) if targets else {})
+                                       **_progress(ctx)) if targets else {})
     if BASELINE in results:
         if any(r.error for r in results[BASELINE].rollouts):
             st.decision = {"accept": None, "baseline_failed": True,
@@ -1014,7 +1019,7 @@ def _confirm(ctx: Ctx) -> None:
                                                                                        ctx.rl.feedback / cand_dir)}
     _expect(ctx, runs=len(targets) * len(ctx.evolve) * cfg.rollouts)
     results = evaluator.evaluate_many(cfg, ctx.evolve, targets, st.benchmark, current={BASELINE},
-                                      on_done=_on_done(ctx))
+                                      **_progress(ctx))
     baseline, result = results[BASELINE], results[chosen["sample"]]
     again = "did not hold up when measured again"
     if any(r.error for r in baseline.rollouts):
