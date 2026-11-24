@@ -105,6 +105,20 @@ class LockTest(unittest.TestCase):
 
 
 class RunStateTest(unittest.TestCase):
+    def test_old_state_loads(self):
+        st = state.RunState(
+            run="r", project="/p", branch="rsi/r", base_ref="main", config={}, benchmark="b-v1", rounds=1,
+            evolve_ids=[], heldout_ids=[], start_sha="a", current_sha="a", eval_sha="a")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            st.save(path)
+            old = json.loads(path.read_text())
+            for key in ("eval_dir", "external"):
+                del old[key]
+            path.write_text(json.dumps(old))
+            loaded = state.RunState.load(path)
+            self.assertEqual((loaded.eval_dir, loaded.external), ("", False))
+
     def test_round_trip(self):
         st = state.RunState(
             run="20261120-0900", project="/p", branch="rsi/20261120-0900", base_ref="main",

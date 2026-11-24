@@ -18,6 +18,10 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(loop.planned_task_runs(6, 6, 1, 2, 3, every_round=False), 54)
         self.assertEqual(loop.planned_task_runs(6, 6, 1, 0, 3, every_round=False), 18)
 
+    def test_planned_task_runs_paired(self):
+        self.assertEqual(loop.planned_task_runs(1, 1, 4, 5, 3, every_round=False, paired=True), 92)
+        self.assertEqual(loop.planned_task_runs(6, 6, 1, 2, 3, every_round=False, paired=True), 66)
+
     def test_tolerance_is_compared_at_score_precision(self):
         # 0.07 - 0.01 is 0.060000000000000005 in floating point; a candidate at 0.06 is exactly at the limit.
         self.assertFalse(loop._below_tolerance(current=0.07, candidate=0.06, tolerance=0.01))

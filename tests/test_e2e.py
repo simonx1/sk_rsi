@@ -483,6 +483,110 @@ class AgentCallsTest(ToyCase):
         self.assertFalse((Layout("toy").run(st.run).agents / "round-0" / "s1.try1").exists())
 
 
+class PairedTest(ToyCase):
+    def conditions(self, factors=None, fail=None):
+        """Change the scoring conditions before chosen steps.
+
+        `factors` maps (step, round) to what every score is multiplied by from that step on, and `fail`
+        names the (step, round) in which rollouts of the run branch's own worktree fail.
+        """
+        factor_file, fail_file = self.tmp / "factor", self.tmp / "fail"
+        os.environ["TOY_FACTOR_FILE"], os.environ["TOY_FAIL_FILE"] = str(factor_file), str(fail_file)
+        factors = factors or {}
+
+        def before(step, real):
+            def handler(ctx):
+                key = (step, ctx.state.round)
+                if key in factors:
+                    factor_file.write_text(str(factors[key]))
+                if key == fail:
+                    fail_file.write_text("/main")
+                else:
+                    fail_file.unlink(missing_ok=True)
+                real(ctx)
+            return handler
+
+        steps = ("baseline", "evaluate", "heldout_end")
+        self.enterContext(mock.patch.dict(loop._HANDLERS, {s: before(s, loop._HANDLERS[s]) for s in steps}))
+
+    def test_a_drop_in_the_machines_is_not_a_loss(self):
+        project = self.make_toy(tasks_extra="paired = true", rounds=1, candidates=1)
+        self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 0.5, ("heldout_end", 1): 1.0})
+        st = loop.run(project)
+        entry = st.rounds_log[0]
+        self.assertEqual((entry["accepted"], entry["score_before"], entry["score_after"]), ("s1", 16.67, 33.33))
+        self.assertEqual(st.scores, [33.33, 33.33])
+        rl = Layout("toy").run(st.run)
+        self.assertTrue((rl.feedback / f"{st.start_sha}.r0" / "t01" / "r1" / "rollout.json").is_file())
+        memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
+        attempt = memory["problems"][0]["attempts"][0]
+        self.assertEqual((attempt["score_before"], attempt["score_after"], attempt["fixed"]),
+                         (16.67, 33.33, ["t03", "t05"]))
+        self.assertEqual((st.heldout["start"], st.heldout["end"]), (33.33, 66.67))
+
+    def test_the_next_round_reads_the_newest_results(self):
+        project = self.make_toy(tasks_extra="paired = true")
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        rl = Layout("toy").run(st.run)
+        prompt = (rl.agents / "round-1" / "s1" / "prompt.md").read_text()
+        accepted_in_round_0 = history(st, 0, "s1/result.json")["sha"]
+        self.assertIn(f"{rl.feedback}/{accepted_in_round_0}/", prompt)
+        # round 1 measured that harness again, beside its candidates
+        self.assertTrue((rl.feedback / f"{accepted_in_round_0}.r1").is_dir())
+
+    def test_heldout_start_and_end_are_scored_together(self):
+        project = self.make_toy(tasks_extra="paired = true", metrics=True)
+        st = loop.run(project)
+        self.assertEqual((st.heldout["start"], st.heldout["end"]), (33.33, 83.33))
+        self.assertEqual(st.heldout["metrics_start"], {"rules": 2.0, "labels": 2.0})
+        self.assertEqual(st.heldout["metrics_end"], {"rules": 5.0, "labels": 3.0})
+        rl = Layout("toy").run(st.run)
+        self.assertEqual(sorted(p.name for p in rl.heldout.iterdir()), ["end-final", "end-start"])
+        self.assertFalse((rl.worktrees / "start").exists())
+        self.assertEqual(git(project, "worktree", "list").count("\n"), 0)  # only the owner's checkout is left
+
+    def test_nothing_accepted_scores_heldout_once(self):
+        project = self.make_toy(script="script_guard.json", tasks_extra="paired = true", rounds=1, candidates=1)
+        st = loop.run(project)
+        self.assertEqual((st.heldout["start"], st.heldout["end"]), (33.33, 33.33))
+        self.assertEqual([p.name for p in Layout("toy").run(st.run).heldout.iterdir()], ["end-final"])
+
+    def test_a_failed_baseline_run_stops_the_round(self):
+        project = self.make_toy(tasks_extra="paired = true", rounds=1, candidates=1)
+        self.conditions(fail=("evaluate", 0))
+        st = loop.run(project)
+        entry = st.rounds_log[0]
+        self.assertIsNone(entry["accepted"])
+        self.assertEqual(entry["reason"], "the round's baseline had failed runs; nothing can be compared")
+        self.assertFalse((Layout("toy").run(st.run).agents / "round-0" / "select").exists())
+        self.assertEqual(st.scores, [33.33, 33.33])  # the failed measurement is not taken as the harness's score
+        self.assertEqual(st.eval_dir, "")
+
+    def test_resume_inside_a_paired_round(self):
+        call_log = self.tmp / "calls.log"
+        os.environ["TOY_CALL_LOG"] = str(call_log)
+        project = self.make_toy(tasks_extra="paired = true")
+        real = evaluator.run_rollout
+        counter = itertools.count(1)
+
+        # 6 baseline rollouts run first; the 9th new rollout is inside round 0's batch of 12.
+        def dies_on_the_9th(cfg, task, rollout, checkout, out_dir, benchmark):
+            if not (out_dir / evaluator.MARKER).exists() and next(counter) == 9:
+                raise RuntimeError("killed")
+            return real(cfg, task, rollout, checkout, out_dir, benchmark)
+
+        with mock.patch.object(evaluator, "run_rollout", dies_on_the_9th):
+            with self.assertRaises(RuntimeError):
+                loop.run(project)
+        self.assertEqual(loop.find_unfinished(Layout("toy")).step, "evaluate")
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        self.assertEqual((st.heldout["start"], st.heldout["end"]), (33.33, 83.33))
+        ran = call_log.read_text().splitlines()
+        self.assertEqual(len(ran), len(set(ran)))
+
+
 class ContinuationTest(ToyCase):
     def test_setting_change_records_a_hop_and_carries_the_memory(self):
         project = self.make_toy()

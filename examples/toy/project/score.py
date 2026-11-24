@@ -17,10 +17,19 @@ def main(task_file, checkout, out):
     spec = importlib.util.spec_from_file_location("classify", Path(checkout) / "classify.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    got = module.classify(task["text"], module.load_rules(Path(checkout) / "rules.txt"))
+    fail_file = os.environ.get("TOY_FAIL_FILE")  # tests: fail when the checkout's path ends with the file's text
+    if fail_file and os.path.exists(fail_file) and str(checkout).endswith(Path(fail_file).read_text().strip()):
+        sys.exit(7)
+    rules = module.load_rules(Path(checkout) / "rules.txt")
+    got = module.classify(task["text"], rules)
     correct = got == task["label"]
     summary = f"{task['text']!r}: got {got}, expected {task['label']}"
-    Path(out, "result.json").write_text(json.dumps({"score": 1.0 if correct else 0.0, "summary": summary}))
+    factor_file = os.environ.get("TOY_FACTOR_FILE")  # tests: stands for machines that got faster or slower
+    factor = float(Path(factor_file).read_text()) if factor_file and os.path.exists(factor_file) else 1.0
+    result = {"score": (1.0 if correct else 0.0) * factor, "summary": summary}
+    if task.get("metrics"):
+        result["metrics"] = {"rules": len(rules), "labels": len({label for _, label in rules})}
+    Path(out, "result.json").write_text(json.dumps(result))
     log = os.environ.get("TOY_CALL_LOG")
     if log:
         with open(log, "a") as handle:

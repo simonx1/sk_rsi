@@ -147,6 +147,13 @@ def add_worktree(repo: Path, path: Path, branch: str, start: str) -> None:
         git(repo, "worktree", "add", "-b", branch, str(path), start)
 
 
+def add_detached_worktree(repo: Path, path: Path, ref: str) -> None:
+    """A worktree at `ref` that is on no branch, replacing whatever was at `path`."""
+    remove_worktree(repo, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    git(repo, "worktree", "add", "--detach", str(path), ref)
+
+
 def reset_worktree(repo: Path, path: Path, branch: str, start: str) -> None:
     """A fresh worktree on a fresh `branch` at `start`, discarding whatever was there."""
     remove_worktree(repo, path)

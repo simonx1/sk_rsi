@@ -112,6 +112,14 @@ class RunTest(CliCase):
         _, out, _ = self.rsi("run", "--dry-run", "--rounds", "0", "--project", project)
         self.assertIn("up to 18 task runs", out)
 
+    def test_dry_run_in_paired_mode(self):
+        project = self.make_toy(tasks_extra="paired = true")
+        code, out, _ = self.rsi("run", "--dry-run", "--project", project)
+        self.assertEqual(code, 0)
+        self.assertIn("up to 66 task runs", out)
+        self.assertIn("the current version is measured again in every round", out)
+        self.assertIn("held-out scored once at the end, the starting and the final version together", out)
+
     def test_run_then_status(self):
         project = self.make_toy()
         code, out, err = self.rsi("run", "--project", project)

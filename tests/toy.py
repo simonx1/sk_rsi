@@ -108,13 +108,17 @@ class ToyCase(unittest.TestCase):
         path.write_text(self.config_text(**settings))
         return path
 
-    def make_toy(self, script: str = "script.json", external: bool = False, **settings) -> Path:
+    def make_toy(self, script: str = "script.json", external: bool = False, metrics: bool = False,
+                 **settings) -> Path:
         project = self.tmp / "project"
         shutil.copytree(TOY / "project", project)
         self.write_config(project, external=external, **settings)
         private = self.home / "toy" / "private"
         private.mkdir(parents=True, exist_ok=True)
-        shutil.copy(TOY / "bench" / "tasks.jsonl", private / "tasks.jsonl")
+        lines = (TOY / "bench" / "tasks.jsonl").read_text().splitlines()
+        if metrics:  # each task also reports how many rules and distinct labels the harness has
+            lines = [line[:-1] + ', "metrics": true}' for line in lines]
+        (private / "tasks.jsonl").write_text("\n".join(lines) + "\n")
         shutil.copy(TOY / "bench" / "split.json", private / "split.json")
         git(project, "init", "-q", "-b", "main")
         git(project, "config", "user.email", "test@example.com")
