@@ -151,6 +151,27 @@ class RepoTest(unittest.TestCase):
         self.assertFalse((self.wt / "override.log").exists())
         self.assertEqual(workspace.clean(self.wt), [])
 
+    def test_cherry_pick_clean_and_conflicting(self):
+        workspace.add_worktree(self.repo, self.wt, "edits", "main")
+        (self.wt / "rules.txt").write_text("A => b\n")
+        a = workspace.commit_all(self.wt, "A: change rules.txt")
+        (self.wt / "frozen.py").write_text("x = 2\n")
+        b = workspace.commit_all(self.wt, "B: change frozen.py")
+        (self.wt / "rules.txt").write_text("AA => b\n")
+        c = workspace.commit_all(self.wt, "C: change the line A changed")
+        scratch = self.tmp / "scratch"
+        workspace.add_detached_worktree(self.repo, scratch, "main")
+        self.assertTrue(workspace.cherry_pick(scratch, b))
+        self.assertEqual((scratch / "frozen.py").read_text(), "x = 2\n")
+        self.assertEqual((scratch / "rules.txt").read_text(), "a => b\n")
+        head = workspace.rev_parse(scratch)
+        self.assertFalse(workspace.cherry_pick(scratch, c))
+        self.assertEqual(git(scratch, "status", "--porcelain"), "")
+        self.assertEqual(workspace.rev_parse(scratch), head)
+        workspace.set_branch(self.repo, "picked", head)
+        workspace.set_branch(self.repo, "picked", a)
+        self.assertEqual(workspace.rev_parse(self.repo, "picked"), a)
+
     def test_fast_forward_and_is_merged(self):
         main_wt = self.tmp / "main-wt"
         workspace.add_worktree(self.repo, main_wt, "rsi/run1", "main")

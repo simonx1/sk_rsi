@@ -703,6 +703,54 @@ class LimitsTest(ToyCase):
         self.assertEqual((status["metric"], status["total_pct"], status["state"]), ("rules", 150.0, "ok"))
 
 
+class PerEditE2ETest(ToyCase):
+    def test_a_run_ends_with_one_pull_request_per_accepted_edit(self):
+        from tests.test_promote import FAKE_GH_STATEFUL
+        project = self.make_toy(external=True, metrics=True, tasks_extra="paired = true",
+                                tail='[promotion]\nmode = "per_edit"\ndraft = true')
+        remote = self.tmp / "remote.git"
+        git(self.tmp, "init", "-q", "--bare", str(remote))
+        git(project, "remote", "add", "origin", str(remote))
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "gh").write_text(FAKE_GH_STATEFUL)
+        (bin_dir / "gh").chmod(0o755)
+        prs = self.tmp / "prs.json"
+        os.environ.update(PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", GH_PRS=str(prs),
+                          GH_CALLS=str(self.tmp / "gh-calls.jsonl"))
+
+        st = loop.run(project)
+        self.assertEqual(st.scores, [33.33, 66.67, 83.33])
+        records = st.promoted["prs"]
+        self.assertEqual([(r["round"], r["branch"], r["stacked"], r["draft"]) for r in records],
+                         [(0, f"rsi/{st.run}-r0", False, True), (1, f"rsi/{st.run}-r1", True, True)])
+        self.assertTrue(all(r["url"].startswith("https://example.test/pull/") for r in records))
+        # round 0's branch carries that edit alone; round 1's edit does not apply without it, so its branch has both
+        first = git(remote, "show", f"rsi/{st.run}-r0:rules.txt").splitlines()
+        self.assertEqual(first, ["invoice => billing", "crash => bug", "charged => billing", "error => bug"])
+        self.assertEqual(git(remote, "rev-parse", f"rsi/{st.run}-r1"), git(project, "rev-parse", st.branch))
+        self.assertEqual(git(remote, "ls-tree", "-r", "--name-only", f"rsi/{st.run}-r1").count(".rsi"), 0)
+        created = json.loads(prs.read_text())
+        self.assertEqual([p["base"] for p in created], ["main", "main"])
+        self.assertTrue(created[0]["title"].startswith("Add the keywords"))
+        self.assertIn("| rules | 2.00 | 4.00 | +100.00% |", created[0]["body"])
+        self.assertIn("Each side: 1 run per task, measured in the same batch in round 0.", created[0]["body"])
+        self.assertIn("This branch contains those edits. Merge them first.", created[1]["body"])
+        self.assertIn("Held-out: 33.33 → 83.33", created[1]["body"])
+        self.assertEqual(git(project, "worktree", "list").count("\n"), 0)
+
+        from rsi import cli
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(cli.main(["status", "--project", str(project)]), 0)
+            self.assertEqual(cli.main(["promote", "--project", str(project)]), 0)
+        self.assertIn(f"  round 0, rsi/{st.run}-r0: https://example.test/pull/1 (draft)", out.getvalue())
+        self.assertIn(f"  round 1, rsi/{st.run}-r1; contains the earlier edits: https://example.test/pull/2 (draft)",
+                      out.getvalue())
+        self.assertEqual(len(json.loads(prs.read_text())), 2)  # promoting again opened nothing new
+
+
 class ContinuationTest(ToyCase):
     def test_setting_change_records_a_hop_and_carries_the_memory(self):
         project = self.make_toy()

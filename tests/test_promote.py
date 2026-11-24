@@ -149,3 +149,199 @@ class PromoteTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GH_FAIL": "1"}):
             result = self.go()
         self.assertEqual(result["error"], "gh pr create failed: not logged in")
+
+
+# A gh that keeps the pull requests it was asked to create, so that `pr list` can answer for them.
+FAKE_GH_STATEFUL = '''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+store = os.environ["GH_PRS"]
+prs = json.load(open(store)) if os.path.exists(store) else []
+with open(os.environ["GH_CALLS"], "a") as fh:
+    fh.write(json.dumps(args) + "\\n")
+value = lambda flag: args[args.index(flag) + 1]
+if args[:2] == ["pr", "list"]:
+    print(json.dumps([{"url": p["url"], "isDraft": p["isDraft"]} for p in prs if p["head"] == value("--head")][:1]))
+elif args[:2] == ["pr", "create"]:
+    if os.environ.get("GH_FAIL_ON") == value("--head"):
+        sys.stderr.write("not logged in\\n")
+        sys.exit(1)
+    pr = {"head": value("--head"), "base": value("--base"), "title": value("--title"),
+          "body": open(value("--body-file")).read(), "isDraft": "--draft" in args,
+          "url": "https://example.test/pull/%d" % (len(prs) + 1)}
+    json.dump(prs + [pr], open(store, "w"))
+    print(pr["url"])
+'''
+
+RUN = "20261120-0900"
+
+
+class PerEditTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.repo = make_repo(self.tmp / "repo", {"a.txt": "one\ntwo\n", "b.txt": "x\n"})
+        self.start = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-b", f"rsi/{RUN}")
+        self.edits = []
+        for name, text, subject in (("a.txt", "ONE\ntwo\n", "E0"), ("b.txt", "y\n", "E1"), ("a.txt", "uno\ntwo\n", "E2")):
+            (self.repo / name).write_text(text)
+            git(self.repo, "commit", "-q", "-am", subject)
+            self.edits.append(git(self.repo, "rev-parse", "HEAD"))
+        git(self.repo, "checkout", "-q", "main")
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        gh = bin_dir / "gh"
+        gh.write_text(FAKE_GH_STATEFUL)
+        gh.chmod(0o755)
+        self.prs, self.calls = self.tmp / "prs.json", self.tmp / "calls.jsonl"
+        self.enterContext(mock.patch.dict(os.environ, {
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "GH_PRS": str(self.prs), "GH_CALLS": str(self.calls)}))
+        self.cfg = replace(minimal_config(), repo=str(self.repo), promotion_mode="per_edit", paired=True)
+        self.memory = sim.empty()
+        sim.record_attempt(self.memory, {"new": "too few workers"}, {"run": RUN, "round": 0})
+        self.st = self.make_state()
+        self.scratch = self.tmp / "scratch"
+
+    def entry(self, round_no, sha, title):
+        return {"round": round_no, "accepted": "s1" if sha else None, "problem": "P1" if sha else None, "opened": False,
+                "what": f"{title}.\nA longer explanation." if sha else None, "title": title if sha else None,
+                "risk": "Workers may queue." if sha else None, "sha": sha,
+                "score_before": 50.0, "score_after": 61.0 if sha else 50.0,
+                "fixed": [], "missed": [], "regressed": [], "reason": "scripted", "dropped": [],
+                "expected": {"wall_s": -20.0} if sha else {}, "observed": {"wall_s": -25.00, "cost_usd": 6.00} if sha else {},
+                "metrics_before": {"wall_s": 800.0, "cost_usd": 4.00} if sha else {},
+                "metrics_after": {"wall_s": 600.0, "cost_usd": 4.24} if sha else {}, "limits": [], "runs": 4}
+
+    def make_state(self, heldout=None):
+        st = RunState(run=RUN, project=str(self.repo), branch=f"rsi/{RUN}", base_ref="main", config={},
+                      benchmark="bench-v1", rounds=4, evolve_ids=[], heldout_ids=[],
+                      start_sha=self.start, current_sha=self.edits[2], eval_sha=self.edits[2], external=True)
+        st.scores = [50.0, 61.0, 63.0, 63.0, 66.0]
+        st.heldout = heldout or {"start": 50.1, "end": 60.9, "limits": []}
+        st.rounds_log = [self.entry(0, self.edits[0], "Edit zero"), self.entry(1, self.edits[1], "Edit one"),
+                         self.entry(2, None, None), self.entry(3, self.edits[2], "Edit two")]
+        return st
+
+    def add_remote(self):
+        remote = self.tmp / "remote.git"
+        git(self.tmp, "init", "-q", "--bare", str(remote))
+        git(self.repo, "remote", "add", "origin", str(remote))
+        return remote
+
+    def go(self, st=None, cfg=None):
+        return promote.promote(self.repo, st or self.st, cfg or self.cfg, self.memory, scratch=self.scratch)
+
+    def creates(self):
+        calls = [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+        return [c for c in calls if c[:2] == ["pr", "create"]]
+
+    def test_branches_independent_and_stacked(self):
+        got = promote.build_edit_branches(self.repo, self.st, self.cfg, self.scratch)
+        self.assertEqual([(b["round"], b["branch"], b["stacked"]) for b in got],
+                         [(0, f"rsi/{RUN}-r0", False), (1, f"rsi/{RUN}-r1", False), (3, f"rsi/{RUN}-r3", True)])
+        self.assertEqual(git(self.repo, "diff", "--name-only", self.start, f"rsi/{RUN}-r1"), "b.txt")
+        self.assertEqual(git(self.repo, "show", f"rsi/{RUN}-r1:a.txt"), "one\ntwo")  # without the earlier edit
+        self.assertEqual(git(self.repo, "rev-parse", f"rsi/{RUN}-r3"), self.edits[2])
+        self.assertFalse(self.scratch.exists())
+        tips = [git(self.repo, "rev-parse", b["branch"]) for b in got]
+        again = promote.build_edit_branches(self.repo, self.st, self.cfg, self.scratch)
+        self.assertEqual(again, got)
+        self.assertEqual([git(self.repo, "rev-parse", b["branch"]) for b in again], tips)
+
+    def test_branch_prefix(self):
+        cfg = replace(self.cfg, branch_prefix="sk-bench-")
+        self.assertEqual(promote.edit_branch(cfg, self.st, self.st.rounds_log[1]), f"sk-bench-{RUN}-r1")
+
+    def test_opens_one_pull_request_per_edit(self):
+        remote = self.add_remote()
+        result = self.go()
+        self.assertEqual([(r["round"], r["url"], r["draft"], r["stacked"]) for r in result["prs"]],
+                         [(0, "https://example.test/pull/1", False, False), (1, "https://example.test/pull/2", False, False),
+                          (3, "https://example.test/pull/3", False, True)])
+        self.assertNotIn("manual", result)
+        created = json.loads(self.prs.read_text())
+        self.assertEqual([(p["head"], p["base"], p["title"]) for p in created],
+                         [(f"rsi/{RUN}-r0", "main", "Edit zero"), (f"rsi/{RUN}-r1", "main", "Edit one"),
+                          (f"rsi/{RUN}-r3", "main", "Edit two")])
+        self.assertIn("## Measured", created[0]["body"])
+        self.assertIn("| wall_s | 800.00 | 600.00 | -25.00% |", created[0]["body"])
+        self.assertEqual(git(remote, "rev-parse", f"refs/heads/rsi/{RUN}-r3"), self.edits[2])
+
+    def test_draft_when_configured_or_warned(self):
+        self.add_remote()
+        result = self.go(cfg=replace(self.cfg, draft=True))
+        self.assertTrue(all(r["draft"] for r in result["prs"]))
+        self.assertTrue(all("--draft" in call for call in self.creates()))
+        self.assertFalse(json.loads(self.prs.read_text())[0]["body"].startswith("> **Warning"))
+
+    def test_a_heldout_drop_makes_drafts_with_a_warning(self):
+        self.add_remote()
+        st = self.make_state(heldout={"start": 33.33, "end": 16.67, "limits": []})
+        result = self.go(st=st)
+        self.assertTrue(all(r["draft"] for r in result["prs"]))
+        body = json.loads(self.prs.read_text())[0]["body"]
+        self.assertTrue(body.startswith("> **Warning:** the held-out score went down (33.33 → 16.67)"), body[:120])
+
+    def test_a_heldout_limit_makes_drafts_with_a_warning(self):
+        over = {"metric": "cost_usd", "direction": "increase", "allowed_pct": 10.0, "total_pct": 12.3, "state": "over"}
+        st = self.make_state(heldout={"start": 50.0, "end": 60.0, "limits": [over]})
+        self.assertEqual(promote.run_warning(st), "the whole run is past a limit: cost_usd +12.30% of +10.00% allowed")
+        self.assertIsNone(promote.run_warning(self.st))
+
+    def test_second_promote_creates_only_what_is_missing(self):
+        self.add_remote()
+        with mock.patch.dict(os.environ, {"GH_FAIL_ON": f"rsi/{RUN}-r1"}):
+            first = self.go()
+        self.assertEqual([sorted(k for k in r if k in ("url", "error")) for r in first["prs"]], [["url"], ["error"], ["url"]])
+        self.assertEqual(first["prs"][1]["error"], "gh pr create failed: not logged in")
+        self.st.promoted = first
+        second = self.go()
+        self.assertEqual([r.get("url") for r in second["prs"]],
+                         ["https://example.test/pull/1", "https://example.test/pull/3", "https://example.test/pull/2"])
+        self.assertEqual([c[c.index("--head") + 1] for c in self.creates()],
+                         [f"rsi/{RUN}-r0", f"rsi/{RUN}-r1", f"rsi/{RUN}-r3", f"rsi/{RUN}-r1"])
+
+    def test_an_existing_pull_request_is_reused(self):
+        self.add_remote()
+        self.prs.write_text(json.dumps([{"head": f"rsi/{RUN}-r0", "url": "https://example.test/pull/77", "isDraft": True}]))
+        result = self.go()
+        self.assertEqual((result["prs"][0]["url"], result["prs"][0]["draft"]), ("https://example.test/pull/77", True))
+        self.assertEqual(len(self.creates()), 2)
+
+    def test_without_a_remote_branches_exist_and_commands_are_printed(self):
+        result = self.go()
+        self.assertEqual([r["skipped"] for r in result["prs"]], ["the project has no git remote"] * 3)
+        self.assertEqual(git(self.repo, "rev-parse", f"rsi/{RUN}-r3"), self.edits[2])
+        self.assertEqual(result["manual"][0], f"git push -u origin rsi/{RUN}-r0")
+        self.assertEqual(result["manual"][1], f"gh pr create --base main --head rsi/{RUN}-r0 --title 'Edit zero'")
+        self.assertEqual(len(result["manual"]), 6)
+        self.assertFalse(self.calls.exists())
+
+    def test_nothing_accepted(self):
+        self.st.rounds_log = [self.entry(0, None, None)]
+        self.assertEqual(self.go(), {"skipped": "no edit was accepted in this run"})
+
+    def test_title_falls_back_to_the_first_line(self):
+        entry = dict(self.st.rounds_log[0], title=None, what="x" * 80 + "\nmore")
+        self.assertEqual(promote.edit_title(entry), "x" * 69 + "...")
+        self.assertEqual(promote.edit_title(self.st.rounds_log[0]), "Edit zero")
+
+    def test_body_sections(self):
+        log = self.st.rounds_log
+        body = promote.edit_body(self.st, self.cfg, self.memory, log[3], earlier=[log[0], log[1]], stacked=True)
+        headings = [line for line in body.splitlines() if line.startswith("## ")]
+        self.assertEqual(headings, ["## What", "## Measured", "## Predicted and measured", "## Risk",
+                                    "## Measured on top of", "## Whole run", "## Memory"])
+        for line in ("Edit two.", "A longer explanation.", "| | Before | After | Change |",
+                     "| Score | 50.00 | 61.00 | +11.00 |", "| wall_s | 800.00 | 600.00 | -25.00% |",
+                     "| cost_usd | 4.00 | 4.24 | +6.00% |",
+                     "Each side: 4 runs per task, measured in the same batch in round 3.",
+                     "- wall_s: predicted -20.00%, measured -25.00%", "Workers may queue.",
+                     "- Edit zero", "- Edit one", "This branch contains those edits. Merge them first.",
+                     "Held-out: 50.10 → 60.90", "**P1**: too few workers"):
+            self.assertIn(line, body)
+        first = promote.edit_body(self.st, self.cfg, self.memory, log[0], earlier=[], stacked=False)
+        self.assertIn("Nothing: this edit was measured on the starting version.", first)
+        self.assertNotIn("Merge them first", first)
+        unpaired = promote.edit_body(self.st, replace(self.cfg, paired=False), self.memory, log[0], earlier=[], stacked=False)
+        self.assertIn("Each side: 4 runs per task. The baseline was measured before round 0.", unpaired)

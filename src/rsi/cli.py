@@ -72,6 +72,21 @@ def _plural(count: int, noun: str) -> str:
 
 
 def _promotion_lines(result: dict) -> list[str]:
+    if "prs" in result:  # one pull request per accepted edit
+        lines = ["Pull requests:"]
+        for record in result["prs"]:
+            if "url" in record:
+                what = record["url"] + (" (draft)" if record.get("draft") else "")
+            elif "error" in record:
+                what = "failed: " + record["error"]
+            else:
+                what = "not opened: " + record["skipped"]
+            note = "; contains the earlier edits" if record.get("stacked") else ""
+            lines.append(f"  round {record['round']}, {record['branch']}{note}: {what}")
+        if result.get("manual"):
+            lines.append("To promote by hand:")
+            lines += [f"  {command}" for command in result["manual"]]
+        return lines
     if "url" in result:
         lines = ["Pull request: " + result["url"] + (" (draft: the held-out score went down)" if result["draft"] else "")]
     elif "error" in result:
@@ -194,7 +209,13 @@ def _run(args: argparse.Namespace, proj: projects.Project) -> int:
     st = loop.run(proj.repo, rounds=args.rounds, from_ref=args.from_ref,
                   promote=not args.no_promote, new=args.new)
     print("\n".join(_status_lines(st, proj.layout)))
-    return 1 if st.promoted and "error" in st.promoted else 0
+    return 1 if _promotion_failed(st.promoted) else 0
+
+
+def _promotion_failed(result: dict | None) -> bool:
+    if not result:
+        return False
+    return "error" in result or any("error" in record for record in result.get("prs", []))
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -265,10 +286,11 @@ def cmd_promote(args: argparse.Namespace) -> int:
             memory = json.loads(workspace.show(project, st.branch, loop.SIM_PATH))
         except workspace.GitError:
             memory = sim.empty()
-    st.promoted = promote.promote(project, st, config.Config.from_dict(st.config), memory)
+    st.promoted = promote.promote(project, st, config.Config.from_dict(st.config), memory,
+                                  scratch=layout.run(st.run).worktrees / "promote")
     st.save(layout.run(st.run).state_file)
     print("\n".join(_promotion_lines(st.promoted)))
-    return 1 if "error" in st.promoted else 0
+    return 1 if _promotion_failed(st.promoted) else 0
 
 
 def cmd_sim_show(args: argparse.Namespace) -> int:

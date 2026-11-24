@@ -450,7 +450,8 @@ def _heldout_paired(ctx: Ctx) -> None:
 
 def _promote(ctx: Ctx) -> None:
     st = ctx.state
-    st.promoted = promote_mod.promote(ctx.project, st, ctx.cfg, _load_sim(ctx))
+    st.promoted = promote_mod.promote(ctx.project, st, ctx.cfg, _load_sim(ctx),
+                                      scratch=ctx.rl.worktrees / "promote")
     st.step = "done"
 
 

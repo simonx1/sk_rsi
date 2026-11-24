@@ -194,6 +194,20 @@ def clean(worktree: Path) -> list[str]:
     return dirty
 
 
+def cherry_pick(worktree: Path, sha: str) -> bool:
+    """Apply one commit on top of the worktree's HEAD. On a conflict nothing is left behind and it returns False."""
+    if git_ok(worktree, "cherry-pick", "--allow-empty", sha):
+        return True
+    git(worktree, "cherry-pick", "--abort", check=False)
+    git(worktree, "reset", "--hard", "-q", check=False)
+    return False
+
+
+def set_branch(repo: Path, branch: str, sha: str) -> None:
+    """Make `branch` point at `sha`, creating it when needed."""
+    git(repo, "branch", "-f", branch, sha)
+
+
 def fast_forward(worktree: Path, sha: str) -> None:
     git(worktree, "merge", "--ff-only", sha)
 
