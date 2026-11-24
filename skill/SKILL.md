@@ -49,6 +49,13 @@ Then:
 
 Do not start `rsi run` without the user's go-ahead after they have seen the dry-run count.
 
+## When the goal is a measurement
+
+If the goal is a number that varies from run to run (time, cost) rather than a set of right answers,
+read "Measured goals" in the framework's README before writing the config. It covers metrics, limits
+on them, measuring the current version beside the candidates, keeping the config outside a shared
+repository with `rsi init --external`, and one pull request per accepted edit.
+
 ## Running and inspecting
 
 ```bash

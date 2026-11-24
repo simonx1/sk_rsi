@@ -1,4 +1,6 @@
+import os
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -38,6 +40,56 @@ class DocsTest(unittest.TestCase):
         block = re.search(r"```toml\n(.*?)```", text, re.S).group(1)
         cfg = config.parse(block)
         self.assertEqual(cfg.name, "ticket-triage")
+
+    NEW_KEYS = ("repo =", "paired =", "min_gain =", "[[constraints]]", "max_increase_pct", "max_decrease_pct",
+                "cli =", "mode =", "draft =", "branch_prefix =")
+
+    def measured_section(self):
+        text = (ROOT / "README.md").read_text()
+        start = text.index("## Measured goals")
+        end = text.index("\n## ", start + 1)
+        return text[start:end]
+
+    def test_readme_measured_goals_example_loads(self):
+        section = self.measured_section()
+        cfg = config.parse(re.search(r"```toml\n(.*?)```", section, re.S).group(1))
+        self.assertTrue(cfg.paired)
+        self.assertEqual([(c.metric, c.direction) for c in cfg.constraints],
+                         [("cost_usd", "increase"), ("accuracy_pct", "decrease")])
+        self.assertEqual((cfg.agent_cli, cfg.promotion_mode), ("agy", "per_edit"))
+        self.assertIsNotNone(cfg.repo)
+        self.assertIsNotNone(cfg.min_gain)
+
+    def test_readme_names_every_new_key(self):
+        section = self.measured_section()
+        for key in self.NEW_KEYS + ("rsi init --external", '"metrics"', '"expected"', '"title"'):
+            self.assertIn(key, section, key)
+
+    def test_template_mentions_every_new_key_and_still_loads(self):
+        for key in self.NEW_KEYS:
+            self.assertIn(key, cli.TEMPLATE, key)
+        cfg = config.parse(cli.TEMPLATE.replace("{name}", "example"))
+        self.assertEqual((cfg.paired, cfg.constraints, cfg.agent_cli, cfg.promotion_mode), (False, (), "claude", "per_run"))
+
+    def test_nothing_about_an_application_of_the_framework_is_in_the_repository(self):
+        """The repository is public: it holds the framework, not what it is used on.
+
+        The words to look for would themselves name those applications, so they live outside the
+        repository: one per line in the file $RSI_BANNED_WORDS names, ~/.rsi/banned-words by default.
+        Lines starting with # are comments. Without that file the test is skipped."""
+        words_file = Path(os.environ.get("RSI_BANNED_WORDS", "~/.rsi/banned-words")).expanduser()
+        if not words_file.is_file():
+            self.skipTest(f"no {words_file}")
+        if not (ROOT / ".git").exists():
+            self.skipTest("not a git checkout")
+        words = sorted({line.strip().lower() for line in words_file.read_text().splitlines()
+                        if line.strip() and not line.strip().startswith("#")})
+        git = lambda *args: subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True, check=True).stdout
+        texts = {name: (ROOT / name).read_text(errors="replace")
+                 for name in git("ls-files", "-z").split("\0") if name and (ROOT / name).is_file()}
+        texts["commit messages"] = git("log", "--format=%B", "HEAD")
+        found = [f"{word} in {where}" for where, text in texts.items() for word in words if word in text.lower()]
+        self.assertEqual(found, [])
 
     def test_skill_has_front_matter(self):
         text = (ROOT / "skill" / "SKILL.md").read_text()

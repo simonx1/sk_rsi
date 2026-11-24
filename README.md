@@ -137,6 +137,109 @@ Evidence is shown to the agents as context and never decides which edit is kept.
 held-out task is withheld. Task records are queued and join the benchmark only on `rsi continue`,
 which raises the benchmark version (`replay-v1` to `replay-v2`).
 
+## Measured goals
+
+Some goals are a measurement, not a set of right answers: how fast a service answers, what a job
+costs. The measurement is noisy, a second number must stay within bounds, and the project may be a
+shared repository where the loop should leave nothing of its own. These options cover that. All are
+off by default.
+
+```toml
+[project]
+name = "latency"
+repo = "~/work/service"      # this config lives in ~/.rsi/latency/, not in the repository
+base_branch = "main"
+
+[setting]
+benchmark = "latency"
+model = "load-test"
+
+[harness]
+editable = ["src/**", "config/**"]
+
+[tasks]
+rollouts = 4
+paired = true
+
+[commands]
+run_task = "python3 ~/tools/measure.py {task_file} {checkout} {out} {rollout}"
+
+[budget]
+rounds = 5
+candidates = 3
+parallel = 4
+min_gain = 1.0
+
+[[constraints]]
+metric = "cost_usd"
+max_increase_pct = 10
+
+[[constraints]]
+metric = "accuracy_pct"
+max_decrease_pct = 0
+
+[agents]
+cli = "agy"
+model = "gemini-4-neon"
+effort = "high"
+
+[promotion]
+mode = "per_edit"
+draft = true
+branch_prefix = "rsi/"
+```
+
+**Metrics.** `result.json` may carry named numbers beside the score:
+`{"score": 0.61, "metrics": {"p95_ms": 182, "cost_usd": 4.20}}`. Names are lower-case with digits and
+underscores. A rollout need not report every metric. Their means are shown to the agents, in
+`rsi status`, in the memory and in pull requests. The score is still the one thing the loop optimizes.
+
+**Limits.** Each `[[constraints]]` entry names a metric and `max_increase_pct` or `max_decrease_pct`
+(0 means not at all). A limit is relative to the version the run started from, and it adds up over the
+rounds: an edit that would take the total past a limit cannot be accepted, whatever the selector says.
+The same holds for a candidate that does not report a limited metric the current version reports. A
+limit covers one run. To keep a total over several runs, lower it as earlier changes are merged.
+
+**Paired measurement.** With `paired = true`, every round scores the current version again in the
+same batch as the candidates, and compares them with that fresh result. A change in the machines
+between rounds then is not mistaken for a gain or a loss. Held-out is scored once, at the end, for
+the starting and the final version together. This costs one more set of task runs per round;
+`rsi run --dry-run` shows the count. If a run of that fresh baseline fails, nothing is accepted that
+round.
+
+**Minimum gain.** `min_gain` is the number of score points a candidate must gain to be accepted.
+
+**Predictions.** In its manifest a proposer may give a `"title"` for the edit and, under
+`"expected"`, the percent change it expects per metric: `{"title": "Cache the parsed config", "expected":
+{"p95_ms": -20}}`. The memory keeps the expected and the measured change side by side.
+
+**Files outside the repository.** `rsi init --external` writes the config to
+`~/.rsi/<name>/config.toml` with `repo` set. The memory (`sim.json`) and the log (`log.md`) then live
+beside it, the loop commits nothing of its own, and the run branch holds only the accepted edits. The
+memory is one file for all runs of the project, whether or not their edits were merged.
+
+**One pull request per edit.** With `mode = "per_edit"` each accepted edit gets its own branch,
+`<branch_prefix><run>-r<round>`, and pull request. The edit is cherry-picked onto the commit the run
+started from. When it does not apply there, it depends on earlier edits: its branch then contains
+them, and its pull request says which to merge first. Each body gives the measurements before and
+after, and what the edit was measured on top of. Pull requests are drafts when `draft = true`, when
+the held-out score went down, or when the held-out total is past a limit. Promoting again opens only
+what is missing.
+
+**Agents.** `cli = "agy"` uses the `agy` CLI instead of `claude`. The two are kept in bounds
+differently:
+
+| | `claude` (default) | `agy` |
+|---|---|---|
+| Shell | removed by restricted mode | every command is denied |
+| Files outside its folders | out of reach in restricted mode, and denied by rule | denied |
+| Private directory | denied by rule | outside its folders, so denied |
+| Feedback and history folders | read-only on disk, and edits denied by rule | read-only on disk |
+
+A denied action ends an `agy` session at once. What it wrote before still counts; if that is not a
+valid answer, the call is made once more. Any agent call that leaves no valid output is made once
+more, except after a timeout.
+
 ## Where things live
 
 | Place | Contents |
@@ -150,6 +253,8 @@ which raises the benchmark version (`replay-v1` to `replay-v2`).
 Set `RSI_HOME` to use a directory other than `~/.rsi`.
 
 ## Guards
+
+- While agents run, the feedback and history folders are read-only on disk, whatever agent is used.
 
 - A candidate may only change `harness.editable` paths. `harness.frozen` and `.rsi/` are off limits.
   A `run_task`, `check` or `ingest` command may not name any file the loop can edit: freeze the file,

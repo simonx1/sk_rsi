@@ -17,6 +17,7 @@ TEMPLATE = """\
 [project]
 name = "{name}"              # names the state directory (~/.rsi/{name}/) and nothing else
 base_branch = "main"
+# repo = "~/work/project"    # only in a config kept outside the repository (rsi init --external)
 
 [setting]
 benchmark = "{name}"         # a label; the framework appends -v<n>
@@ -33,6 +34,7 @@ heldout_fraction = 0.5
 rollouts = 1
 pass_threshold = 0.5
 heldout = "endpoints"        # or "every_round"
+# paired = true              # for a noisy measurement: score the current version again beside the candidates
 
 [commands]
 # Placeholders arrive shell-quoted, so do not quote them: {task_file} {task_id} {checkout} {out} {rollout}
@@ -50,9 +52,23 @@ agent_timeout_s = 1800
 max_wall_clock_h = 48
 tolerance = 1.0              # score points a candidate may lose and still be accepted
 max_infra_failure_rate = 0.3
+# min_gain = 1.0             # score points a candidate must gain to be accepted
+
+# A limit on a metric that run_task reports, relative to where the run started. One entry per limit.
+# [[constraints]]
+# metric = "cost_usd"
+# max_increase_pct = 10      # or max_decrease_pct; 0 means not at all
+
+# [agents]
+# cli = "agy"                # default "claude"; "agy" also needs model
+# model = "gemini-4-neon"
+# effort = "high"
 
 [promotion]
 pull_request = true
+# mode = "per_edit"          # one pull request per accepted edit; needs a config kept outside the repository
+# draft = true
+# branch_prefix = "rsi/"
 """
 
 

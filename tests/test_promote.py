@@ -153,21 +153,25 @@ class PromoteTest(unittest.TestCase):
 
 # A gh that keeps the pull requests it was asked to create, so that `pr list` can answer for them.
 FAKE_GH_STATEFUL = '''#!/usr/bin/env python3
-import json, os, sys
+import json, os, subprocess, sys
 args = sys.argv[1:]
 store = os.environ["GH_PRS"]
+tip = lambda branch: subprocess.run(["git", "rev-parse", branch], capture_output=True, text=True).stdout.strip()
 prs = json.load(open(store)) if os.path.exists(store) else []
 with open(os.environ["GH_CALLS"], "a") as fh:
     fh.write(json.dumps(args) + "\\n")
 value = lambda flag: args[args.index(flag) + 1]
 if args[:2] == ["pr", "list"]:
-    print(json.dumps([{"url": p["url"], "isDraft": p["isDraft"]} for p in prs if p["head"] == value("--head")][:1]))
+    fields = value("--json").split(",")
+    found = [p for p in prs if p["head"] == value("--head")][:int(value("--limit"))]
+    print(json.dumps([{f: p.get(f) for f in fields} for p in found]))
 elif args[:2] == ["pr", "create"]:
     if os.environ.get("GH_FAIL_ON") == value("--head"):
         sys.stderr.write("not logged in\\n")
         sys.exit(1)
     pr = {"head": value("--head"), "base": value("--base"), "title": value("--title"),
           "body": open(value("--body-file")).read(), "isDraft": "--draft" in args,
+          "headRefOid": tip(value("--head")), "isCrossRepository": False, "state": "OPEN",
           "url": "https://example.test/pull/%d" % (len(prs) + 1)}
     json.dump(prs + [pr], open(store, "w"))
     print(pr["url"])
@@ -303,10 +307,29 @@ class PerEditTest(unittest.TestCase):
 
     def test_an_existing_pull_request_is_reused(self):
         self.add_remote()
-        self.prs.write_text(json.dumps([{"head": f"rsi/{RUN}-r0", "url": "https://example.test/pull/77", "isDraft": True}]))
+        promote.build_edit_branches(self.repo, self.st, self.cfg, self.scratch)
+        tip = git(self.repo, "rev-parse", f"rsi/{RUN}-r0")
+        self.prs.write_text(json.dumps([{"head": f"rsi/{RUN}-r0", "url": "https://example.test/pull/77", "isDraft": True,
+                                         "headRefOid": tip, "isCrossRepository": False, "state": "CLOSED"}]))
         result = self.go()
         self.assertEqual((result["prs"][0]["url"], result["prs"][0]["draft"]), ("https://example.test/pull/77", True))
         self.assertEqual(len(self.creates()), 2)
+
+    def test_a_pull_request_that_is_not_ours_is_not_reused(self):
+        """Same branch name, but from a fork, or for another commit: it is somebody else's pull request."""
+        self.add_remote()
+        promote.build_edit_branches(self.repo, self.st, self.cfg, self.scratch)
+        tip = git(self.repo, "rev-parse", f"rsi/{RUN}-r0")
+        others = [
+            {"head": f"rsi/{RUN}-r0", "url": "https://example.test/pull/66", "isDraft": False,
+             "headRefOid": tip, "isCrossRepository": True, "state": "OPEN"},
+            {"head": f"rsi/{RUN}-r0", "url": "https://example.test/pull/67", "isDraft": False,
+             "headRefOid": "0" * 40, "isCrossRepository": False, "state": "OPEN"},
+        ]
+        self.prs.write_text(json.dumps(others))
+        result = self.go()
+        self.assertNotIn(result["prs"][0]["url"], ("https://example.test/pull/66", "https://example.test/pull/67"))
+        self.assertEqual(len(self.creates()), 3)
 
     def test_without_a_remote_branches_exist_and_commands_are_printed(self):
         result = self.go()

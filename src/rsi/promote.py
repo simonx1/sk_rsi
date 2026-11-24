@@ -238,16 +238,25 @@ def edit_body(st: RunState, cfg: Config, memory: dict, entry: dict, earlier: lis
 
 
 def _existing_pr(project: Path, branch: str) -> dict | None:
-    """The pull request already open (or closed) for a branch, so that promoting twice makes no duplicate."""
-    done = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "url,isDraft",
-                           "--limit", "1"], cwd=str(project), capture_output=True, text=True)
+    """Our own pull request for this branch, if there is one, so that promoting twice makes no duplicate.
+
+    A pull request with the same branch name is ours only when it comes from this repository and its
+    head is the commit we pushed. One from a fork, or for another commit, is somebody else's.
+    """
+    done = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "all",
+                           "--json", "url,isDraft,headRefOid,isCrossRepository", "--limit", "20"],
+                          cwd=str(project), capture_output=True, text=True)
     if done.returncode != 0:
         return None
     try:
         found = json.loads(done.stdout or "[]")
     except ValueError:
         return None
-    return found[0] if isinstance(found, list) and found and isinstance(found[0], dict) else None
+    tip = workspace.rev_parse(project, branch)
+    for pr in found if isinstance(found, list) else []:
+        if isinstance(pr, dict) and not pr.get("isCrossRepository") and pr.get("headRefOid") == tip:
+            return pr
+    return None
 
 
 def _create_pr(project: Path, base: str, branch: str, title: str, body: str, draft: bool) -> dict:
