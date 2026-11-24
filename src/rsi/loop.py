@@ -364,13 +364,21 @@ def _runs_left(ctx: Ctx) -> int:
     return left
 
 
+def _agent_steps_left(step: str, round_no: int, rounds: int) -> int:
+    """Agent steps (propose, screen, select) still to come, not counting one under way."""
+    rest = max(rounds - round_no, 0)
+    if step in ("heldout_start", "baseline", "ingest", "heldout_round"):
+        return len(AGENT_STEPS) * rest
+    if step in ROUND_STEPS:
+        after = {"propose": 2, "screen": 1, "evaluate": 1}.get(step, 0)
+        return after + len(AGENT_STEPS) * max(rest - 1, 0)
+    return 0
+
+
 def _snapshot(ctx: Ctx) -> progress.Snapshot:
     st, cfg, tr = ctx.state, ctx.cfg, ctx.tracker
     now = time.monotonic()
     scores = list(st.scores)
-    rounds_left = max(st.rounds - st.round, 0) if st.step not in ("heldout_end", "promote") else 0
-    if st.step in ROUND_STEPS and st.step not in ("ingest", "propose", "screen"):
-        rounds_left = max(rounds_left - 1, 0)
     return progress.Snapshot(
         run=st.run, status=st.status, round=_round_shown(st), rounds=st.rounds, step=tr.step,
         done=tr.done, total=tr.total, failed=tr.failed, agents_running=tr.agents_running,
@@ -380,8 +388,8 @@ def _snapshot(ctx: Ctx) -> progress.Snapshot:
         metrics=dict(tr.metrics),
         limits={c.metric: (st.metric_ratio.get(c.metric, 1.0) - 1) * 100 for c in cfg.constraints},
         elapsed=st.active_seconds + (now - ctx.step_began), step_elapsed=now - tr.step_started,
-        eta=progress.eta_seconds(_runs_left(ctx), list(tr.run_seconds), cfg.parallel, rounds_left,
-                                 tr.finished_agent_rounds()))
+        eta=progress.eta_seconds(_runs_left(ctx), list(tr.run_seconds), cfg.parallel,
+                                 _agent_steps_left(st.step, st.round, st.rounds), tr.agent_steps()))
 
 
 def _expect(ctx: Ctx, runs: int = 0, agents: int = 0) -> None:

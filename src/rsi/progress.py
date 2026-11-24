@@ -5,6 +5,7 @@ Its content is a template with named fields, set under [progress] in a project's
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import string
@@ -24,11 +25,16 @@ NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def check_template(line: str) -> None:
-    """Refuse a template that names a field the progress line does not have."""
+    """Refuse a template that names a field the progress line does not have, or that cannot be shown.
+
+    The second check renders the line once with every value missing and once with every value set, so a
+    format spec that does not suit its field (`{step:d}`) is refused when the run starts, not hours later.
+    """
     try:
         parts = list(string.Formatter().parse(line))
     except ValueError as error:
         raise ValueError(f"progress.line is not a valid template: {error}") from None
+    named: dict[str, dict] = {group: {} for group in GROUPS}
     for _, name, _, _ in parts:
         if name is None:
             continue
@@ -36,6 +42,16 @@ def check_template(line: str) -> None:
         ok = (not dot and name in FIELDS) or (dot and group in GROUPS and NAME.match(rest))
         if not ok:
             raise ValueError(f"unknown field {name or '{}'} in progress.line")
+        if dot:
+            named[group][rest] = 1.0
+    filled = Snapshot(run="r", round=1, rounds=2, done=1, total=2, failed=1, agents_running=1, agents_total=2,
+                      errors=1, accepted=1, score=1.0, start_score=1.0, metrics=named["metric"],
+                      limits=named["limit"], elapsed=1.0, step_elapsed=1.0, eta=1.0)
+    for snap in (Snapshot(run="r"), filled):
+        try:
+            render(line, snap)
+        except (ValueError, KeyError, IndexError, AttributeError, TypeError) as error:
+            raise ValueError(f"progress.line cannot be shown: {error!r}") from None
 
 
 def duration(seconds: float) -> str:
@@ -72,27 +88,48 @@ class Snapshot:
     eta: float | None = None
 
 
+class _Value:
+    """One field. With no format spec it shows its usual text; with one, the spec formats the value itself:
+    `{score:.1f}` formats the number, `{step:>10}` pads the words. A missing value is `-` either way."""
+
+    def __init__(self, value, text: str | None = None):
+        self.value = value
+        self.text = ("-" if value is None else str(value)) if text is None else text
+
+    def __format__(self, spec: str) -> str:
+        if not spec:
+            return self.text
+        if self.value is None:
+            try:
+                return format(self.text, spec)   # keeps a width or an alignment
+            except ValueError:
+                return self.text                 # a number's spec, such as .1f
+        return format(self.value, spec)
+
+
 class _Group:
     """`metric.<name>` and `limit.<name>`: any name, `-` when there is no value."""
 
     def __init__(self, values: dict, show):
         self._values, self._show = values, show
 
-    def __getattr__(self, name: str) -> str:
+    def __getattr__(self, name: str) -> _Value:
         value = self._values.get(name)
-        return "-" if value is None else self._show(value)
+        return _Value(value, None if value is None else self._show(value))
 
 
 def render(line: str, snap: Snapshot) -> str:
-    number = lambda value: "-" if value is None else f"{value:.2f}"
+    number = lambda value: _Value(value, None if value is None else f"{value:.2f}")
+    times = lambda seconds: _Value(duration(seconds))
     values = {
-        "run": snap.run, "status": snap.status, "step": snap.step,
-        "round": str(snap.round), "rounds": str(snap.rounds), "done": str(snap.done), "total": str(snap.total),
-        "failed": str(snap.failed), "errors": str(snap.errors), "accepted": str(snap.accepted),
-        "agents": f"{snap.agents_running}/{snap.agents_total}" if snap.agents_total else "-",
+        "run": _Value(snap.run), "status": _Value(snap.status), "step": _Value(snap.step),
+        "round": _Value(snap.round), "rounds": _Value(snap.rounds), "done": _Value(snap.done),
+        "total": _Value(snap.total), "failed": _Value(snap.failed), "errors": _Value(snap.errors),
+        "accepted": _Value(snap.accepted),
+        "agents": _Value(f"{snap.agents_running}/{snap.agents_total}" if snap.agents_total else None),
         "score": number(snap.score), "start_score": number(snap.start_score),
-        "elapsed": duration(snap.elapsed), "step_elapsed": duration(snap.step_elapsed),
-        "eta": "?" if snap.eta is None else duration(snap.eta),
+        "elapsed": times(snap.elapsed), "step_elapsed": times(snap.step_elapsed),
+        "eta": _Value("?") if snap.eta is None else times(snap.eta),
         "metric": _Group(snap.metrics, lambda v: f"{v:.2f}"),
         "limit": _Group(snap.limits, lambda v: f"{v:+.2f}%"),
     }
@@ -100,16 +137,25 @@ def render(line: str, snap: Snapshot) -> str:
 
 
 def eta_seconds(runs_left: int, run_seconds: list[float], parallel: int,
-                agent_rounds_left: int, agent_seconds: list[float]) -> float | None:
-    """Time left: runs still to make at the average run time so far, plus agent time per round still to come."""
+                agent_steps_left: int, agent_step_seconds: list[float]) -> float | None:
+    """Time left: runs still to make at the average run time so far, divided among the parallel slots,
+    plus agent steps still to come at the average time an agent step has taken."""
     if not run_seconds:
         return None
     runs = runs_left * (sum(run_seconds) / len(run_seconds)) / max(parallel, 1)
-    agents = agent_rounds_left * (sum(agent_seconds) / len(agent_seconds)) if agent_seconds else 0.0
+    agents = agent_steps_left * (sum(agent_step_seconds) / len(agent_step_seconds)) if agent_step_seconds else 0.0
     return runs + agents
 
 
 CLEAR = "\r\x1b[K"   # back to the start of the line, and erase it
+
+
+def _columns(stream: TextIO) -> int:
+    """The width of the terminal the line is drawn on; stdout may be a file while stderr is the terminal."""
+    try:
+        return os.get_terminal_size(stream.fileno()).columns
+    except (AttributeError, OSError, ValueError):
+        return shutil.get_terminal_size().columns
 
 
 class Printer:
@@ -138,7 +184,7 @@ class Printer:
             return f"progress unavailable: {error}"
 
     def _draw(self) -> None:
-        width = self.width or max(shutil.get_terminal_size().columns - 1, 20)
+        width = self.width or max(_columns(self.stream) - 1, 20)
         self.stream.write(CLEAR + self._text()[:width])
         self.stream.flush()
 
@@ -234,7 +280,7 @@ class Tracker:
         self.agents_running = self.agents_total = 0
         self.errors = 0
         self.run_seconds: list[float] = []
-        self.agent_seconds: dict[int, float] = {}   # per round: time spent in steps where agents work
+        self.agent_step_seconds: list[float] = []   # each finished step in which agents were called
         self.metrics: dict = {}
         self._agent_step = False
         self._round = 0
@@ -242,8 +288,8 @@ class Tracker:
     def begin_step(self, word: str, round_no: int, agent_step: bool) -> None:
         with self._lock:
             now = self.clock()
-            if self._agent_step:
-                self.agent_seconds[self._round] = self.agent_seconds.get(self._round, 0.0) + now - self.step_started
+            if self._agent_step and self.agents_total:
+                self.agent_step_seconds.append(now - self.step_started)
             self.step, self._round, self._agent_step, self.step_started = word, round_no, agent_step, now
             self.done = self.total = self.failed = 0
             self.agents_running = self.agents_total = 0
@@ -272,6 +318,6 @@ class Tracker:
             if not ok:
                 self.errors += 1
 
-    def finished_agent_rounds(self) -> list[float]:
+    def agent_steps(self) -> list[float]:
         with self._lock:
-            return [seconds for round_no, seconds in self.agent_seconds.items() if round_no < self._round]
+            return list(self.agent_step_seconds)

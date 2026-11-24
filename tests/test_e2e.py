@@ -896,6 +896,8 @@ class ProgressTest(ToyCase):
         sha = next(c["sha"] for c in stopped.candidates if c["sample"] == "s1")
         finished = len(list((Layout("toy").run(stopped.run).feedback / sha).rglob(evaluator.MARKER)))
         self.assertTrue(1 <= finished < 6, finished)
+        from rsi import cli
+        self.assertIn("Round 1 of 1, next step: measuring", cli._status_lines(stopped, Layout("toy")))
         st, text = self.run_capturing(project, promote=False)
         self.assertEqual(st.scores, [33.33, 66.67])
         measured = [line for line in text.splitlines() if line.startswith("[rsi] round 1 · measuring · s1 ·")]

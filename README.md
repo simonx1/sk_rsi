@@ -291,8 +291,10 @@ log_interval_s = 300    # how often it is printed as a plain line when the outpu
 
 A field without a value shows `-`; the time left shows `?` until a task run has finished. It counts
 the most task runs the rest of the run can take, so it tends to be high. A field the template names
-that does not exist is refused when the run starts. A project can use its own words, for example
-`line = "build {done}/{total} · p95 {metric.p95_ms} ms · ~{eta} left"`.
+that does not exist, or a format spec that does not suit its field, is refused when the run starts. A
+field takes a Python format spec: `{score:.1f}` and `{metric.p95_ms:.0f}` format the number, `{step:>12}`
+pads the words. A project can use its own words, for example
+`line = "build {done}/{total} · p95 {metric.p95_ms:.0f} ms · ~{eta} left"`.
 
 When the output is not a terminal (a log file, `nohup`), the live line is printed as an ordinary line
 every `log_interval_s` and at each step's start, so a log carries no control characters.

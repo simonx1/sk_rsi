@@ -37,6 +37,22 @@ class FormatTest(unittest.TestCase):
                 progress.check_template(line)
         progress.check_template("{metric.wall_s:>8} {limit.cost_usd} {round!s} plain text {{braces}}")
 
+    def test_format_specs(self):
+        snap = progress.Snapshot(run="r1", round=2, score=61.2, metrics={"wall_s": 636.4}, limits={"cost_usd": 6.0},
+                                 elapsed=2280, step="measuring")
+        self.assertEqual(progress.render("{score:.1f}|{round:d}|{round:>3}|{metric.wall_s:.0f}|{limit.cost_usd:.1f}|"
+                                         "{step:>10}|{elapsed:>5}", snap),
+                         "61.2|2|  2|636|6.0| measuring|  38m")
+        empty = progress.Snapshot(run="r1")
+        self.assertEqual(progress.render("{score:.1f} {metric.x:.0f} {eta:>3}", empty), "- -   ?")
+        for line in ("{score:.1f}", "{round:d}", "{metric.wall_s:.0f}", "{elapsed:>8}"):
+            progress.check_template(line)
+
+    def test_a_spec_that_cannot_render_is_refused(self):
+        for line in ("{step:d}", "{round:{nope}}", "{score:zz}", "{run:.2f}"):
+            with self.subTest(line=line), self.assertRaises(ValueError):
+                progress.check_template(line)
+
     def test_a_broken_template_is_refused(self):
         with self.assertRaises(ValueError):
             progress.check_template("{round")
@@ -67,10 +83,27 @@ class FormatTest(unittest.TestCase):
 
 class EtaTest(unittest.TestCase):
     def test_eta(self):
-        self.assertEqual(progress.eta_seconds(16, [600, 900], 4, 2, [600]), 16 * 750 / 4 + 2 * 600)
-        self.assertEqual(progress.eta_seconds(16, [600], 4, 2, []), 2400)
-        self.assertIsNone(progress.eta_seconds(16, [], 4, 2, [600]))
+        # runs left x mean run time / parallel, plus agent steps left x mean agent step time
+        self.assertEqual(progress.eta_seconds(16, [600, 900], 4, 6, [300, 500]), 16 * 750 / 4 + 6 * 400)
+        self.assertEqual(progress.eta_seconds(16, [600], 4, 6, []), 2400)
+        self.assertIsNone(progress.eta_seconds(16, [], 4, 6, [600]))
         self.assertEqual(progress.eta_seconds(0, [600], 4, 0, [600]), 0)
+
+    def test_tracker_keeps_each_finished_agent_step(self):
+        clock = Clock()
+        tracker = progress.Tracker(clock=clock)
+        tracker.begin_step("asking agents", 0, agent_step=True)
+        tracker.expect(agents=3)
+        clock.now = 600
+        tracker.begin_step("screening", 0, agent_step=True)
+        tracker.expect(agents=1)
+        clock.now = 700
+        tracker.begin_step("measuring", 0, agent_step=False)
+        clock.now = 3000
+        tracker.begin_step("selecting", 0, agent_step=True)     # called no agent: not an agent step's time
+        clock.now = 3001
+        tracker.begin_step("recording", 0, agent_step=False)
+        self.assertEqual(tracker.agent_step_seconds, [600, 100])
 
 
 class PrinterTest(unittest.TestCase):
@@ -87,6 +120,22 @@ class PrinterTest(unittest.TestCase):
         printer.say("[rsi] step started")
         self.assertEqual(self.stream.getvalue(),
                          "\r\x1b[Kmeasuring 1/4\r\x1b[K[rsi] step started\n\r\x1b[Kmeasuring 2/4")
+
+    def test_width_comes_from_the_stream_drawn_on(self):
+        import fcntl, os, struct, termios
+        main, side = os.openpty()
+        self.addCleanup(os.close, main)
+        self.addCleanup(os.close, side)
+        fcntl.ioctl(side, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 60, 0, 0))
+
+        class PtyStream(FakeStream):
+            def fileno(self):
+                return side
+
+        stream = PtyStream(True)
+        snap = progress.Snapshot(run="r1", step="x" * 200)
+        progress.Printer(stream, "{step}", "all", 5, 300, lambda: snap).tick()
+        self.assertEqual(len(stream.getvalue()), len(progress.CLEAR) + 59)
 
     def test_line_is_cut_to_the_terminal_width(self):
         printer = self.make(tty=True, width=5)

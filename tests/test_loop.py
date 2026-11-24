@@ -23,6 +23,15 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(loop.planned_task_runs(1, 1, 4, 5, 3, every_round=False, paired=True, confirm=True), 132)
         self.assertEqual(loop.planned_task_runs(6, 6, 1, 2, 3, every_round=False, paired=True), 66)
 
+    def test_agent_steps_left(self):
+        self.assertEqual(loop._agent_steps_left("baseline", 0, 5), 15)
+        self.assertEqual(loop._agent_steps_left("ingest", 0, 5), 15)
+        self.assertEqual(loop._agent_steps_left("propose", 0, 5), 14)      # this one is under way
+        self.assertEqual(loop._agent_steps_left("screen", 2, 5), 7)
+        self.assertEqual(loop._agent_steps_left("evaluate", 2, 5), 7)
+        self.assertEqual(loop._agent_steps_left("record", 4, 5), 0)
+        self.assertEqual(loop._agent_steps_left("heldout_end", 5, 5), 0)
+
     def test_tolerance_is_compared_at_score_precision(self):
         # 0.07 - 0.01 is 0.060000000000000005 in floating point; a candidate at 0.06 is exactly at the limit.
         self.assertFalse(loop._below_tolerance(current=0.07, candidate=0.06, tolerance=0.01))

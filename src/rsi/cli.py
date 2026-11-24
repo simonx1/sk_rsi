@@ -128,7 +128,7 @@ def _status_lines(st: RunState, layout: Layout) -> list[str]:
     lines = [
         headline,
         f"Setting: {st.benchmark}, {st.config['model']}",
-        f"Round {min(st.round, st.rounds)} of {st.rounds}, next step: {st.step}",
+        f"Round {loop._round_shown(st)} of {st.rounds}, next step: {loop.STEP_WORDS.get(st.step, st.step)}",
     ]
     if st.scores:
         lines.append("Evolve: " + " → ".join(f"{score:.2f}" for score in st.scores))
