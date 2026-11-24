@@ -252,6 +252,51 @@ A denied action ends an `agy` session at once. What it wrote before still counts
 valid answer, the call is made once more. Any agent call that leaves no valid output is made once
 more, except after a timeout.
 
+## Progress
+
+While `rsi run` works it keeps one live line at the bottom of the terminal, rewritten every few
+seconds, and prints a line that stays for every finished task run and agent call, so a failure shows
+the moment it happens:
+
+```
+[rsi] 20261124-1818 round 2/5: measuring
+[rsi] round 2 · measuring · s2 · task-7 run 3/4: score 0.53 in 13m11s
+[rsi] round 2 · measuring · s2 · task-7 run 4/4 FAILED: exit code 3
+[rsi] round 2 · proposer s1: done in 9m12s
+round 2/5 · measuring · runs 9/16, 1 failed · agents - · score 61.20 · 38m in step, 4h12m total, ~7h05m left
+```
+
+What the live line says is a template in the config. This section is optional; these are the defaults:
+
+```toml
+[progress]
+line = "round {round}/{rounds} · {step} · runs {done}/{total}, {failed} failed · agents {agents} · score {score} · {step_elapsed} in step, {elapsed} total, ~{eta} left"
+events = "all"          # lines for finished task runs and agent calls: "all", "failures" or "none"
+interval_s = 5          # how often the line is redrawn in a terminal
+log_interval_s = 300    # how often it is printed as a plain line when the output is not a terminal
+```
+
+| Field | Meaning |
+|---|---|
+| `run`, `status` | Run id; `running`, or `error` after a step failed |
+| `round`, `rounds` | Round being worked on, counted from 1 (0 before the first), and how many there are |
+| `step` | What the loop is doing, in words: baseline, asking agents, screening, measuring, selecting, confirming, recording, held-out, opening pull requests |
+| `done`, `total`, `failed` | Task runs of the current step: finished, planned, failed to run |
+| `agents` | Agent calls of the current step, running/planned; `-` when none |
+| `errors`, `accepted` | Failed task runs and agent calls so far; rounds whose change was kept |
+| `score`, `start_score` | Current and starting score |
+| `metric.<name>` | A metric of the current version, such as `{metric.p95_ms}` |
+| `limit.<name>` | How much of a limit the kept changes have used, such as `{limit.cost_usd}` |
+| `elapsed`, `step_elapsed`, `eta` | Active time of the run and of the step, and the time left |
+
+A field without a value shows `-`; the time left shows `?` until a task run has finished. It counts
+the most task runs the rest of the run can take, so it tends to be high. A field the template names
+that does not exist is refused when the run starts. A project can use its own words, for example
+`line = "build {done}/{total} · p95 {metric.p95_ms} ms · ~{eta} left"`.
+
+When the output is not a terminal (a log file, `nohup`), the live line is printed as an ordinary line
+every `log_interval_s` and at each step's start, so a log carries no control characters.
+
 ## Where things live
 
 | Place | Contents |

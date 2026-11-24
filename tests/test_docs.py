@@ -7,6 +7,16 @@ from pathlib import Path
 from rsi import cli, config
 
 ROOT = Path(__file__).resolve().parents[1]
+MINIMAL_FOR_DOCS = """[project]
+name = "docs"
+[setting]
+benchmark = "docs"
+model = "m"
+[harness]
+editable = ["src/**"]
+[commands]
+run_task = "true"
+"""
 
 
 def documented_commands(text):
@@ -90,6 +100,22 @@ class DocsTest(unittest.TestCase):
         texts["commit messages"] = git("log", "--format=%B", "HEAD")
         found = [f"{word} in {where}" for where, text in texts.items() for word in words if word in text.lower()]
         self.assertEqual(found, [])
+
+    def test_readme_documents_the_progress_line(self):
+        from rsi import progress
+        text = (ROOT / "README.md").read_text()
+        start = text.index("## Progress")
+        section = text[start:text.index("\n## ", start + 1)]
+        for name in sorted(progress.FIELDS) + ["metric.<name>", "limit.<name>", '"failures"', '"none"',
+                                               "log_interval_s", "interval_s"]:
+            self.assertIn(name, section, name)
+        cfg = config.parse(re.search(r"```toml\n(.*?)```", section, re.S).group(1)
+                           .replace("[progress]", MINIMAL_FOR_DOCS + "\n[progress]", 1))
+        self.assertEqual(cfg.progress_events, "all")
+
+    def test_template_mentions_progress(self):
+        self.assertIn("# [progress]", cli.TEMPLATE)
+        self.assertIn("# line = ", cli.TEMPLATE)
 
     def test_skill_has_front_matter(self):
         text = (ROOT / "skill" / "SKILL.md").read_text()

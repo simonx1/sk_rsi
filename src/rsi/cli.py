@@ -65,6 +65,11 @@ max_infra_failure_rate = 0.3
 # model = "gemini-4-neon"
 # effort = "high"
 
+# The live progress line while `rsi run` works; see "Progress" in the README for the fields.
+# [progress]
+# line = "round {round}/{rounds} · {step} · runs {done}/{total}, {failed} failed · ~{eta} left"
+# events = "all"             # or "failures", "none"
+
 [promotion]
 pull_request = true
 # mode = "per_edit"          # one pull request per accepted edit; needs a config kept outside the repository
