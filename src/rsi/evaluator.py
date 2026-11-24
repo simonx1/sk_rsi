@@ -8,9 +8,11 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from . import shell
 from .config import Config
@@ -28,6 +30,7 @@ class Rollout:
     error: str | None   # set for an infra failure: the command did not produce a valid result
     summary: str
     metrics: dict = field(default_factory=dict)   # named measurements the task reported, e.g. {"wall_s": 640.0}
+    seconds: float = 0.0                          # how long run_task took; 0 for a result from before this was kept
 
 
 def _read_metrics(raw: object) -> dict[str, float]:
@@ -101,7 +104,9 @@ def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: 
             "RSI_BENCHMARK": benchmark,
             "RSI_CURRENT": "1" if current else "",
         }
+        started = time.monotonic()
         done = shell.run(command, cwd=checkout, timeout=cfg.task_timeout_s, env=env)
+        seconds = round(time.monotonic() - started, 3)
     finally:
         os.unlink(task_path)
     (out_dir / "stdout.log").write_text(done.stdout)
@@ -116,7 +121,7 @@ def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: 
             score, summary, metrics = _read_result(out_dir)
         except ValueError as problem:
             error = str(problem)
-    result = Rollout(task["id"], rollout, score, error, summary, metrics)
+    result = Rollout(task["id"], rollout, score, error, summary, metrics, seconds)
     write_json_atomic(marker, asdict(result))
     return result
 
@@ -191,11 +196,13 @@ def evaluate_many(
     targets: dict[str, tuple[Path, Path]],
     benchmark: str,
     current: set[str] | frozenset[str] = frozenset(),
+    on_done: Callable[[str, Rollout, bool], None] | None = None,
 ) -> dict[str, EvalResult]:
     """Score several checkouts at once, at most cfg.parallel rollouts at a time.
 
     `targets` maps a name to (checkout, results_dir); the targets named in `current` are the version
-    the loop holds now.
+    the loop holds now. `on_done(target, rollout, cached)` is called as each task run finishes;
+    `cached` is True for a result read back from an earlier run.
     """
     collected: dict[str, list[Rollout]] = {name: [] for name in targets}
     pool = ThreadPoolExecutor(max_workers=cfg.parallel)
@@ -207,9 +214,18 @@ def evaluate_many(
             for task in task_list:
                 for name, (checkout, results_dir) in targets.items():
                     out_dir = results_dir / task["id"] / f"r{k}"
-                    futures[pool.submit(run_rollout, cfg, task, k, checkout, out_dir, benchmark, name in current)] = name
+                    cached = (out_dir / MARKER).is_file()
+                    future = pool.submit(run_rollout, cfg, task, k, checkout, out_dir, benchmark, name in current)
+                    futures[future] = (name, cached)
         for future in as_completed(futures):
-            collected[futures[future]].append(future.result())
+            name, cached = futures[future]
+            result = future.result()
+            collected[name].append(result)
+            if on_done is not None:
+                try:
+                    on_done(name, result, cached)
+                except Exception:
+                    pass  # progress reporting must never stop a measurement
     except (KeyboardInterrupt, SystemExit):
         shell.kill_all()  # the rollouts are in their own sessions; without this Ctrl-C waits for them
         pool.shutdown(wait=True, cancel_futures=True)
@@ -227,6 +243,6 @@ def evaluate_many(
 
 
 def evaluate(cfg: Config, task_list: list[dict], checkout: Path, results_dir: Path, benchmark: str,
-             current: bool = False) -> EvalResult:
+             current: bool = False, on_done: Callable[[str, Rollout, bool], None] | None = None) -> EvalResult:
     return evaluate_many(cfg, task_list, {"only": (checkout, results_dir)}, benchmark,
-                         current={"only"} if current else frozenset())["only"]
+                         current={"only"} if current else frozenset(), on_done=on_done)["only"]

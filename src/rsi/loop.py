@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import agents, config, evaluator, measure, outcomes, prompts, shell, sim, tasks, workspace
+from . import agents, config, evaluator, measure, outcomes, progress, prompts, shell, sim, tasks, workspace
 from . import project as projects
 from . import promote as promote_mod
 from .state import Layout, Lock, RunLayout, RunState, read_json
@@ -37,7 +37,7 @@ class RunError(Exception):
 
 
 def _say(message: str) -> None:
-    print(f"[rsi] {message}", file=sys.stderr, flush=True)
+    progress.say(f"[rsi] {message}")
 
 
 def planned_task_runs(evolve: int, heldout: int, rollouts: int, rounds: int, candidates: int,
@@ -144,6 +144,7 @@ class Ctx:
     heldout: list[dict]
     lock: threading.Lock = field(default_factory=threading.Lock)
     step_began: float = 0.0   # time.monotonic() when the running step started
+    tracker: progress.Tracker = field(default_factory=progress.Tracker)
 
     @property
     def main_wt(self) -> Path:
@@ -326,11 +327,107 @@ def run(project: Path, rounds: int | None = None, from_ref: str | None = None,
 
 # --- the state machine ------------------------------------------------------
 
+STEP_WORDS = {
+    "heldout_start": "held-out", "baseline": "baseline", "ingest": "reading outcomes", "propose": "asking agents",
+    "screen": "screening", "evaluate": "measuring", "select": "selecting", "confirm": "confirming",
+    "record": "recording", "heldout_round": "held-out", "heldout_end": "held-out", "promote": "opening pull requests",
+}
+ROUND_STEPS = ("ingest", "propose", "screen", "evaluate", "select", "confirm", "record")
+AGENT_STEPS = ("propose", "screen", "select")
+
+
+def _round_shown(st: RunState) -> int:
+    """The round as people count it: 0 before the first, then 1, 2, ..."""
+    if st.step in ROUND_STEPS:
+        return min(st.round + 1, st.rounds)
+    return 0 if st.step in ("heldout_start", "baseline") else st.round
+
+
+def _runs_left(ctx: Ctx) -> int:
+    """The most task runs the rest of the run can take, as --dry-run counts them."""
+    st, cfg, tr = ctx.state, ctx.cfg, ctx.tracker
+    e, h, r = len(ctx.evolve), len(ctx.heldout), cfg.rollouts
+    confirm = 2 * e * r if cfg.confirm else 0
+    measure_round = e * r * (cfg.candidates + (1 if cfg.paired else 0))
+    per_round = measure_round + confirm + (h * r if cfg.heldout == "every_round" else 0)
+    at_end = h * r * (2 if cfg.paired else 1)
+    left = max(tr.total - tr.done, 0)
+    step = st.step
+    if step in ("heldout_start", "baseline"):
+        left += (e * r if step == "heldout_start" else 0) + st.rounds * per_round + at_end
+    elif step in ROUND_STEPS:
+        rest = {"ingest": measure_round + confirm, "propose": measure_round + confirm,
+                "screen": measure_round + confirm, "evaluate": confirm, "select": confirm}.get(step, 0)
+        left += rest + max(st.rounds - st.round - 1, 0) * per_round + at_end
+    elif step == "heldout_round":
+        left += max(st.rounds - st.round, 0) * per_round + at_end
+    return left
+
+
+def _snapshot(ctx: Ctx) -> progress.Snapshot:
+    st, cfg, tr = ctx.state, ctx.cfg, ctx.tracker
+    now = time.monotonic()
+    scores = list(st.scores)
+    rounds_left = max(st.rounds - st.round, 0) if st.step not in ("heldout_end", "promote") else 0
+    if st.step in ROUND_STEPS and st.step not in ("ingest", "propose", "screen"):
+        rounds_left = max(rounds_left - 1, 0)
+    return progress.Snapshot(
+        run=st.run, status=st.status, round=_round_shown(st), rounds=st.rounds, step=tr.step,
+        done=tr.done, total=tr.total, failed=tr.failed, agents_running=tr.agents_running,
+        agents_total=tr.agents_total, errors=tr.errors,
+        accepted=sum(1 for entry in list(st.rounds_log) if entry.get("accepted")),
+        score=scores[-1] if scores else None, start_score=scores[0] if scores else None,
+        metrics=dict(tr.metrics),
+        limits={c.metric: (st.metric_ratio.get(c.metric, 1.0) - 1) * 100 for c in cfg.constraints},
+        elapsed=st.active_seconds + (now - ctx.step_began), step_elapsed=now - tr.step_started,
+        eta=progress.eta_seconds(_runs_left(ctx), list(tr.run_seconds), cfg.parallel, rounds_left,
+                                 tr.finished_agent_rounds()))
+
+
+def _expect(ctx: Ctx, runs: int = 0, agents: int = 0) -> None:
+    ctx.tracker.expect(runs=runs, agents=agents)
+    progress.refresh()
+
+
+def _target_label(name: str) -> str:
+    return {BASELINE: "current", "only": "current"}.get(name, name)
+
+
+def _on_done(ctx: Ctx):
+    """The callback for a batch of task runs: count each, and print a line for each that ran now."""
+    def report(target: str, rollout: evaluator.Rollout, cached: bool) -> None:
+        ctx.tracker.run_finished(bool(rollout.error), cached, rollout.seconds)
+        if cached:
+            return
+        head = (f"[rsi] round {_round_shown(ctx.state)} · {ctx.tracker.step} · {_target_label(target)} · "
+                f"{rollout.task_id} run {rollout.rollout}/{ctx.cfg.rollouts}")
+        if rollout.error:
+            progress.event(f"{head} FAILED: {rollout.error}", failure=True)
+        else:
+            progress.event(f"{head}: score {rollout.score:.2f} in {progress.duration(rollout.seconds)}", failure=False)
+    return report
+
+
 def _drive(ctx: Ctx, promote: bool) -> None:
+    cfg = ctx.cfg
+    printer = progress.Printer(sys.stderr, cfg.progress_line, cfg.progress_events, cfg.progress_interval_s,
+                               cfg.progress_log_interval_s, lambda: _snapshot(ctx))
+    progress.install(printer)
+    ctx.step_began = time.monotonic()   # before the first line is drawn, so elapsed time starts at 0
+    printer.start()
+    try:
+        _drive_steps(ctx, promote)
+    finally:
+        printer.stop()
+        progress.install(None)
+
+
+def _drive_steps(ctx: Ctx, promote: bool) -> None:
     st = ctx.state
     while st.step != "done":
         began = ctx.step_began = time.monotonic()
-        _say(f"{st.run} round {st.round}: {st.step}")
+        ctx.tracker.begin_step(STEP_WORDS.get(st.step, st.step), st.round, st.step in AGENT_STEPS)
+        _say(f"{st.run} round {_round_shown(st)}/{st.rounds}: {STEP_WORDS.get(st.step, st.step)}")
         try:
             if st.step == "promote" and not promote:
                 st.promoted = {"skipped": "--no-promote"}
@@ -348,11 +445,16 @@ def _drive(ctx: Ctx, promote: bool) -> None:
     workspace.remove_worktree(ctx.project, ctx.main_wt)
 
 
-def _evolve_now(ctx: Ctx) -> evaluator.EvalResult:
-    """Evolve results of the current harness. Read back from disk once they exist."""
+def _evolve_now(ctx: Ctx, counted: bool = False) -> evaluator.EvalResult:
+    """Evolve results of the current harness. Read back from disk once they exist.
+
+    `counted` marks the call that really measures, so that its task runs show in the progress line.
+    """
     st = ctx.state
+    if counted:
+        _expect(ctx, runs=len(ctx.evolve) * ctx.cfg.rollouts)
     return evaluator.evaluate(ctx.cfg, ctx.evolve, ctx.main_wt, ctx.rl.feedback / _eval_dir(st), st.benchmark,
-                              current=True)
+                              current=True, on_done=_on_done(ctx) if counted else None)
 
 
 def _eval_dir(st: RunState) -> str:
@@ -362,8 +464,9 @@ def _eval_dir(st: RunState) -> str:
 
 def _heldout_now(ctx: Ctx) -> evaluator.EvalResult:
     st = ctx.state
+    _expect(ctx, runs=len(ctx.heldout) * ctx.cfg.rollouts)
     return evaluator.evaluate(ctx.cfg, ctx.heldout, ctx.main_wt, ctx.rl.heldout / st.eval_sha, st.benchmark,
-                              current=True)
+                              current=True, on_done=_on_done(ctx))
 
 
 def _stop_if_evaluator_is_broken(ctx: Ctx, result: evaluator.EvalResult, what: str) -> None:
@@ -416,7 +519,8 @@ def _heldout_start(ctx: Ctx) -> None:
 
 
 def _baseline(ctx: Ctx) -> None:
-    result = _evolve_now(ctx)
+    result = _evolve_now(ctx, counted=True)
+    ctx.tracker.metrics = result.metric_means()
     _stop_if_evaluator_is_broken(ctx, result, "evolve")
     ctx.state.scores = [result.score()]
     _say(f"starting evolve score: {result.score():.2f}")
@@ -449,7 +553,9 @@ def _heldout_paired(ctx: Ctx) -> None:
     if any(entry["accepted"] for entry in st.rounds_log):
         workspace.add_detached_worktree(ctx.project, start_wt, st.start_sha)
         targets = {"start": (start_wt, ctx.rl.heldout / "end-start"), **targets}
-    results = evaluator.evaluate_many(ctx.cfg, ctx.heldout, targets, st.benchmark, current=set(targets))
+    _expect(ctx, runs=len(targets) * len(ctx.heldout) * ctx.cfg.rollouts)
+    results = evaluator.evaluate_many(ctx.cfg, ctx.heldout, targets, st.benchmark, current=set(targets),
+                                      on_done=_on_done(ctx))
     workspace.remove_worktree(ctx.project, start_wt)
     final = results["final"]
     start = results.get("start", final)
@@ -538,6 +644,8 @@ def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str
     and the first try's folder is kept beside the new one as `<name>.try1`.
     """
     failure: tuple[str, str] | None = None
+    label = f"proposer {env.get('RSI_SAMPLE', '')}" if role == "proposer" else f"selector ({env.get('RSI_STAGE', '')})"
+    head = lambda: f"[rsi] round {_round_shown(ctx.state)} · {label}"
     for attempt in (1, 2):
         if attempt == 2:
             if reset is not None:
@@ -545,18 +653,29 @@ def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str
             kept = out.with_name(out.name + ".try1")
             shutil.rmtree(kept, ignore_errors=True)
             out.rename(kept)
+            ctx.tracker.expect(agents=1)
         _fresh_dir(out)
+        started = time.monotonic()
+        ctx.tracker.agent_started()
         result = _call_agent(ctx, role, prompt, cwd, out, env)
+        took = progress.duration(time.monotonic() - started)
         if result.ok or result.denied:
             # An agent denied an action may have finished its work first; what it wrote decides.
             try:
-                return read(out), None
+                value = read(out)
             except agents.AgentOutputError as problem:
                 failure = ("agent", result.error) if result.denied else ("output", str(problem))
+            else:
+                ctx.tracker.agent_finished(ok=True)
+                progress.event(f"{head()}: done in {took}", failure=False)
+                return value, None
         else:
             failure = ("agent", result.error)
-            if result.timed_out:
-                break
+        ctx.tracker.agent_finished(ok=False)
+        again = attempt == 1 and not result.timed_out
+        progress.event(f"{head()}: failed: {failure[1]}" + ("; trying once more" if again else ""), failure=True)
+        if not again:
+            break
     return None, failure
 
 
@@ -618,6 +737,7 @@ def _propose(ctx: Ctx) -> None:
 
     # Worktrees are created one at a time: concurrent `git worktree add` calls can collide.
     waiting = [c for c in st.candidates if c["status"] == "new" and not c["agent_done"]]
+    _expect(ctx, agents=len(waiting))
     for c in waiting:
         name = f"r{st.round}-{c['sample']}"
         worktree, branch = ctx.rl.worktrees / name, f"rsi-cand/{st.run}/{name}"
@@ -696,6 +816,7 @@ def _screen(ctx: Ctx) -> None:
     survivors = _with_status(ctx, "proposed")
     if survivors:
         out = ctx.agent_dir("screen")
+        _expect(ctx, agents=1)
         items = [
             {"sample": c["sample"], "manifest": c["manifest"], "files": c["files"],
              "diff": workspace.diff_text(ctx.project, st.current_sha, c["sha"])}
@@ -729,7 +850,9 @@ def _evaluate(ctx: Ctx) -> None:
         # the same conditions. Its fresh result is the round's baseline.
         fresh = f"{st.eval_sha}.r{st.round}"
         targets = {BASELINE: (ctx.main_wt, ctx.rl.feedback / fresh), **targets}
-    results = evaluator.evaluate_many(ctx.cfg, ctx.evolve, targets, st.benchmark, current={BASELINE}) if targets else {}
+    _expect(ctx, runs=len(targets) * len(ctx.evolve) * ctx.cfg.rollouts)
+    results = (evaluator.evaluate_many(ctx.cfg, ctx.evolve, targets, st.benchmark, current={BASELINE},
+                                       on_done=_on_done(ctx)) if targets else {})
     if BASELINE in results:
         if any(r.error for r in results[BASELINE].rollouts):
             st.decision = {"accept": None, "baseline_failed": True,
@@ -761,6 +884,7 @@ def _select(ctx: Ctx) -> None:
             keys = ("sample", "manifest", "files", "score", "fixed", "missed", "regressed", "metrics", "observed", "limits")
             items.append({**{k: c.get(k) for k in keys}, "table": result.table(cfg.pass_threshold)})
         out = ctx.agent_dir("select")
+        _expect(ctx, agents=1)
         prompt = prompts.select_prompt(cfg, st.benchmark, memory, current,
                                        baseline.table(cfg.pass_threshold), items, out)
         samples = [c["sample"] for c in evaluated]
@@ -816,7 +940,9 @@ def _confirm(ctx: Ctx) -> None:
     base_dir, cand_dir = f"{st.eval_sha}.c{st.round}", f"{chosen['sha']}.c{st.round}"
     targets = {BASELINE: (ctx.main_wt, ctx.rl.feedback / base_dir), chosen["sample"]: (Path(chosen["worktree"]),
                                                                                        ctx.rl.feedback / cand_dir)}
-    results = evaluator.evaluate_many(cfg, ctx.evolve, targets, st.benchmark, current={BASELINE})
+    _expect(ctx, runs=len(targets) * len(ctx.evolve) * cfg.rollouts)
+    results = evaluator.evaluate_many(cfg, ctx.evolve, targets, st.benchmark, current={BASELINE},
+                                      on_done=_on_done(ctx))
     baseline, result = results[BASELINE], results[chosen["sample"]]
     again = "did not hold up when measured again"
     if any(r.error for r in baseline.rollouts):
@@ -943,10 +1069,11 @@ def _record(ctx: Ctx) -> None:
         st.eval_sha = chosen["sha"]
         st.eval_dir = chosen.get("eval_dir", chosen["sha"])
     st.current_sha = workspace.rev_parse(ctx.main_wt)
+    ctx.tracker.metrics = dict(chosen["metrics"]) if chosen and chosen.get("metrics") else metrics_before
     st.scores.append(after)
     st.candidates, st.decision = [], None
-    _say(f"round {st.round}: " + (f"accepted {accept}, evolve {before:.2f} -> {after:.2f}" if accept
-                                 else "nothing accepted"))
+    _say(f"round {st.round + 1}/{st.rounds}: " + (f"accepted {accept}, evolve {before:.2f} -> {after:.2f}" if accept
+                                                 else "nothing accepted"))
     st.round += 1
     if cfg.heldout == "every_round":
         st.step = "heldout_round"

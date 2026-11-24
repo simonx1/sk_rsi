@@ -834,6 +834,82 @@ class PerEditE2ETest(ToyCase):
         self.assertEqual(len(json.loads(prs.read_text())), 2)  # promoting again opened nothing new
 
 
+class ProgressTest(ToyCase):
+    def run_capturing(self, project, tty=False, **kwargs):
+        """loop.run with stderr captured; returns (state or the exception, text)."""
+        from tests.test_progress import FakeStream
+        stream = FakeStream(tty)
+        with mock.patch("sys.stderr", stream):
+            try:
+                st = loop.run(project, **kwargs)
+            except loop.RunError as error:
+                st = error
+        return st, stream.getvalue()
+
+    def test_lines_for_steps_and_events(self):
+        project = self.make_toy(rounds=1)
+        st, text = self.run_capturing(project, promote=False)
+        self.assertEqual(st.scores, [33.33, 66.67])
+        self.assertIn(f"[rsi] {st.run} round 1/1: measuring", text)              # step lines, rounds counted from 1
+        self.assertIn(f"[rsi] {st.run} round 0/1: baseline", text)
+        self.assertIn("[rsi] round 1/1: accepted s1, evolve 33.33 -> 66.67", text)
+        self.assertNotRegex(text, r"\dh\d\dm total")                          # a short run: elapsed time stays small
+        self.assertRegex(text, r"\[rsi\] round 0/1 · starting · .* 0s total")
+        self.assertIn("[rsi] round 1 · measuring · s1 · t03 run 1/1: score 1.00 in", text)
+        self.assertIn("[rsi] round 1 · proposer s1: done in", text)
+        self.assertIn("[rsi] round 1 · selector (select): done in", text)
+        self.assertIn("[rsi] round 1/1 · measuring · runs 0/6, 0 failed", text)  # the live line, printed at step start
+        self.assertIn("[rsi] round 0/1 · baseline · runs 0/6", text)
+        self.assertNotIn("\r", text)
+
+    def test_failures_only(self):
+        fail_file = self.tmp / "fail"
+        fail_file.write_text("/r0-s1")
+        os.environ["TOY_FAIL_FILE"] = str(fail_file)
+        project = self.make_toy(rounds=1, tail='[progress]\nevents = "failures"')
+        st, text = self.run_capturing(project, promote=False)
+        self.assertIn("· s1 · t01 run 1/1 FAILED: exit code 7", text)
+        self.assertNotIn(": score 1.00 in", text)
+        self.assertNotIn("proposer s1: done in", text)
+        self.assertIn("[rsi] round 1 · proposer s3: failed", text)              # s3 left an invalid manifest
+
+    def test_a_custom_template(self):
+        project = self.make_toy(rounds=1, tail='[progress]\nline = "R{round} {step} {done}/{total} err={errors} kept={accepted}"')
+        st, text = self.run_capturing(project, promote=False)
+        self.assertIn("[rsi] R1 measuring 0/6 err=", text)
+        self.assertIn("kept=1", text)
+
+    def test_resumed_runs_count_without_lines(self):
+        project = self.make_toy(rounds=1)
+        real = evaluator.run_rollout
+        counter = itertools.count(1)
+
+        def dies_on_the_15th(cfg, task, rollout, checkout, out_dir, benchmark, *rest):
+            if not (out_dir / evaluator.MARKER).exists() and next(counter) == 15:
+                raise RuntimeError("killed")
+            return real(cfg, task, rollout, checkout, out_dir, benchmark, *rest)
+
+        with mock.patch.object(evaluator, "run_rollout", dies_on_the_15th):
+            with self.assertRaises(RuntimeError):
+                self.run_capturing(project, promote=False)
+        stopped = loop.find_unfinished(Layout("toy"))
+        sha = next(c["sha"] for c in stopped.candidates if c["sample"] == "s1")
+        finished = len(list((Layout("toy").run(stopped.run).feedback / sha).rglob(evaluator.MARKER)))
+        self.assertTrue(1 <= finished < 6, finished)
+        st, text = self.run_capturing(project, promote=False)
+        self.assertEqual(st.scores, [33.33, 66.67])
+        measured = [line for line in text.splitlines() if line.startswith("[rsi] round 1 · measuring · s1 ·")]
+        self.assertEqual(len(measured), 6 - finished)          # runs finished before the kill print no line
+
+    def test_a_failed_step_leaves_a_clean_terminal(self):
+        import threading
+        project = self.make_toy(run_task="exit 7")
+        error, text = self.run_capturing(project, tty=True)
+        self.assertIsInstance(error, loop.RunError)
+        self.assertTrue(text.endswith("\r\x1b[K"), repr(text[-40:]))
+        self.assertNotIn("rsi-progress", [t.name for t in threading.enumerate()])
+
+
 class ContinuationTest(ToyCase):
     def test_setting_change_records_a_hop_and_carries_the_memory(self):
         project = self.make_toy()

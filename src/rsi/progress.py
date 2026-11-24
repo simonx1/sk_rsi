@@ -207,3 +207,71 @@ def say(text: str) -> None:
         _installed.say(text)
     else:
         print(text, file=sys.stderr, flush=True)
+
+
+def refresh() -> None:
+    """Show the line now: printed at once in a log, so even a short step leaves one line."""
+    if _installed is not None:
+        _installed.tick(force=True)
+
+
+def event(text: str, failure: bool) -> None:
+    if _installed is not None:
+        _installed.event(text, failure)
+    elif failure:
+        print(text, file=sys.stderr, flush=True)
+
+
+class Tracker:
+    """The counters behind the line: the current step's task runs and agent calls, and timings."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self.clock = clock
+        self._lock = threading.Lock()
+        self.step = "starting"
+        self.step_started = clock()
+        self.done = self.total = self.failed = 0
+        self.agents_running = self.agents_total = 0
+        self.errors = 0
+        self.run_seconds: list[float] = []
+        self.agent_seconds: dict[int, float] = {}   # per round: time spent in steps where agents work
+        self.metrics: dict = {}
+        self._agent_step = False
+        self._round = 0
+
+    def begin_step(self, word: str, round_no: int, agent_step: bool) -> None:
+        with self._lock:
+            now = self.clock()
+            if self._agent_step:
+                self.agent_seconds[self._round] = self.agent_seconds.get(self._round, 0.0) + now - self.step_started
+            self.step, self._round, self._agent_step, self.step_started = word, round_no, agent_step, now
+            self.done = self.total = self.failed = 0
+            self.agents_running = self.agents_total = 0
+
+    def expect(self, runs: int = 0, agents: int = 0) -> None:
+        with self._lock:
+            self.total += runs
+            self.agents_total += agents
+
+    def run_finished(self, error: bool, cached: bool, seconds: float) -> None:
+        with self._lock:
+            self.done += 1
+            if error:
+                self.failed += 1
+                self.errors += 1
+            if not cached and seconds:
+                self.run_seconds.append(seconds)
+
+    def agent_started(self) -> None:
+        with self._lock:
+            self.agents_running += 1
+
+    def agent_finished(self, ok: bool) -> None:
+        with self._lock:
+            self.agents_running = max(self.agents_running - 1, 0)
+            if not ok:
+                self.errors += 1
+
+    def finished_agent_rounds(self) -> list[float]:
+        with self._lock:
+            return [seconds for round_no, seconds in self.agent_seconds.items() if round_no < self._round]

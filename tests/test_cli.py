@@ -144,7 +144,7 @@ class RunTest(CliCase):
             self.assertIn("Pull request: not opened: the project has no git remote", text)
             self.assertIn("  git push -u origin rsi/", text)
             self.assertIn("Pending tasks from live outcomes: 0", text)
-        self.assertIn("[rsi] round 1: accepted s1", err)
+        self.assertIn("[rsi] round 2/2: accepted s1", err)
 
     def test_status_shows_heldout_after_every_round_when_it_was_scored(self):
         project = self.make_toy(heldout="every_round")

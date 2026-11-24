@@ -247,6 +247,26 @@ class EvaluateTest(unittest.TestCase):
                                   x, self.results / "z", "bench-v1", current=True)
         self.assertEqual(only.rollouts[0].summary, "1")
 
+    def test_on_done_reports_each_run_and_whether_it_was_cached(self):
+        seen = []
+        task_list = [{"id": "a", "score": 1}, {"id": "b", "mode": "fail"}]
+        evaluator.evaluate_many(self.cfg, task_list, {"x": (self.checkout, self.results)}, "bench-v1",
+                                on_done=lambda target, rollout, cached: seen.append((target, rollout, cached)))
+        self.assertEqual(sorted((t, r.task_id, r.rollout, c) for t, r, c in seen),
+                         [("x", "a", 1, False), ("x", "a", 2, False), ("x", "b", 1, False), ("x", "b", 2, False)])
+        self.assertTrue(all(r.seconds > 0 for _, r, _ in seen))
+        again = []
+        evaluator.evaluate_many(self.cfg, task_list, {"x": (self.checkout, self.results)}, "bench-v1",
+                                on_done=lambda target, rollout, cached: again.append(cached))
+        self.assertEqual(again, [True] * 4)
+
+    def test_old_marker_has_zero_seconds(self):
+        marker = self.results / "a" / "r1" / "rollout.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text('{"task_id": "a", "rollout": 1, "score": 1.0, "error": null, "summary": ""}')
+        res = self.run_tasks([{"id": "a", "score": 0}], replace(self.cfg, rollouts=1))
+        self.assertEqual(res.rollouts[0].seconds, 0.0)
+
     def test_rollouts_are_submitted_round_robin(self):
         x, y = self.tmp / "x", self.tmp / "y"
         for folder in (x, y):
