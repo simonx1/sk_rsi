@@ -73,6 +73,15 @@ def _measurements(metrics: dict[str, float], limits: tuple, used: dict[str, floa
     return "\n".join(lines)
 
 
+def notes_section(text: str | None) -> str | None:
+    """The owner's standing notes, shown as written; None when there are none."""
+    if not text or not text.strip():
+        return None
+    return ("# Notes from the project's owner\n\n"
+            "Standing notes from the person who runs this project: what is off limits and why, what has "
+            "been measured, where to look. Weigh them before anything else you infer.\n\n" + text.strip())
+
+
 def _patterns(patterns: tuple[str, ...]) -> str:
     return ", ".join(f"`{p}`" for p in patterns) if patterns else "none"
 
@@ -119,6 +128,7 @@ def proposer_prompt(
     metrics: dict[str, float] | None = None,
     limits: tuple = (),
     used: dict[str, float] | None = None,
+    notes: str | None = None,
 ) -> str:
     measured = _measurements(metrics or {}, limits, used or {})
     extra_keys, extra_notes = "", ""
@@ -143,6 +153,7 @@ def proposer_prompt(
         "- You must not change anything under `.rsi/`.\n\n"
         "An edit that breaks these rules is discarded without being evaluated. Do not commit; "
         "your changes are committed for you.",
+        notes_section(notes),
         _memory_section(memory),
         "# Current results on the evolve tasks\n\n"
         f"Harness score: {score:.2f} out of 100.\n\n"
@@ -168,7 +179,7 @@ def proposer_prompt(
     ]
     if measured:
         sections.insert(-2, measured)   # before the live outcomes and the output contract
-    return "\n\n".join(sections) + "\n"
+    return "\n\n".join(section for section in sections if section) + "\n"
 
 
 def _candidate_header(item: dict) -> str:
@@ -204,12 +215,13 @@ def _candidate_measurements(item: dict) -> str:
     return "".join("\n" + line for line in lines)
 
 
-def screen_prompt(cfg: Config, benchmark: str, memory: dict, items: list[dict], out_dir: Path) -> str:
+def screen_prompt(cfg: Config, benchmark: str, memory: dict, items: list[dict], out_dir: Path,
+                  notes: str | None = None) -> str:
     candidates = "\n\n".join(
         f"## Candidate {item['sample']}\n\n{_candidate_header(item)}\n\n```diff\n{item['diff']}\n```"
         for item in items
     )
-    return "\n\n".join([
+    return "\n\n".join(section for section in [
         "# Your job\n\n"
         "You are screening proposed harness edits before they are evaluated. Evaluation is expensive. "
         "Drop a candidate only for a clear reason: it repeats an attempt the memory shows did not work "
@@ -217,6 +229,7 @@ def screen_prompt(cfg: Config, benchmark: str, memory: dict, items: list[dict], 
         "its diff does not do what its manifest says; or it duplicates another candidate. "
         "When unsure, keep it. Do not edit any file except the output file.",
         _setting(cfg, benchmark),
+        notes_section(notes),
         _memory_section(memory),
         f"# Candidates\n\n{candidates}",
         "# Output\n\n"
@@ -224,7 +237,7 @@ def screen_prompt(cfg: Config, benchmark: str, memory: dict, items: list[dict], 
         "```json\n"
         '{"screen": [{"sample": "s1", "keep": true, "reason": "why"}]}\n'
         "```",
-    ]) + "\n"
+    ] if section) + "\n"
 
 
 def select_prompt(
@@ -235,6 +248,7 @@ def select_prompt(
     baseline_table: list[dict],
     items: list[dict],
     out_dir: Path,
+    notes: str | None = None,
 ) -> str:
     sections = []
     for item in items:
@@ -247,7 +261,7 @@ def select_prompt(
             f"Regressed: {', '.join(item['regressed']) or 'none'}\n\n"
             f"{_table(item['table'])}"
         )
-    return "\n\n".join([
+    return "\n\n".join(section for section in [
         "# Your job\n\n"
         "You are choosing which evaluated harness edit to keep, if any. Keep at most one. Weigh the "
         "score change, tasks that regressed, how much complexity the edit adds, and whether it is a "
@@ -255,6 +269,7 @@ def select_prompt(
         f"A candidate scoring more than {cfg.tolerance:.2f} points below the current harness cannot "
         "be accepted. Do not edit any file except the output file.",
         _setting(cfg, benchmark),
+        notes_section(notes),
         _memory_section(memory),
         f"# Current harness: {baseline_score:.2f}\n\n{_table(baseline_table)}",
         "# Candidates\n\n" + "\n\n".join(sections),
@@ -264,4 +279,4 @@ def select_prompt(
         '{"accept": "s2", "reason": "why"}\n'
         "```\n\n"
         'Use `"accept": null` to keep the current harness.',
-    ]) + "\n"
+    ] if section) + "\n"

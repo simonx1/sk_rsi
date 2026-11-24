@@ -1,5 +1,6 @@
 """The whole loop on the toy project, with the scripted agent."""
 
+import io
 import itertools
 import json
 import os
@@ -832,6 +833,35 @@ class PerEditE2ETest(ToyCase):
         self.assertIn(f"  round 1, rsi/{st.run}-r1; contains the earlier edits: https://example.test/pull/2 (draft)",
                       out.getvalue())
         self.assertEqual(len(json.loads(prs.read_text())), 2)  # promoting again opened nothing new
+
+
+class NotesTest(ToyCase):
+    def prompt(self, run: str, round_no: int, name: str) -> str:
+        return (Layout("toy").run(run).agents / f"round-{round_no}" / name / "prompt.md").read_text()
+
+    def test_agents_get_the_notes(self):
+        notes = self.home / "toy" / "notes.md"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text("Rule files are read top to bottom.\n")
+        project = self.make_toy(rounds=1, external=True, agents_extra='notes = "notes.md"')
+        st = loop.run(project, promote=False)
+        for name in ("s1", "screen", "select"):
+            with self.subTest(agent=name):
+                self.assertIn("Rule files are read top to bottom.", self.prompt(st.run, 0, name))
+        self.assertEqual(st.config["agent_notes"], str(notes))
+
+    def test_a_notes_file_removed_mid_run_gives_a_warning(self):
+        notes = self.home / "toy" / "notes.md"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text("Rule files are read top to bottom.\n")
+        project = self.make_toy(rounds=1, external=True, agents_extra='notes = "notes.md"',
+                                proposer_prefix=f"rm -f {shlex.quote(str(notes))}; ")
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            st = loop.run(project, promote=False)
+        self.assertEqual(st.status, "done")
+        self.assertEqual(err.getvalue().count(f"warning: the notes file {notes} is gone"), 1)
+        self.assertNotIn("Rule files are read", self.prompt(st.run, 0, "select"))
 
 
 class ProgressTest(ToyCase):

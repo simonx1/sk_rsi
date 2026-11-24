@@ -97,6 +97,8 @@ def validate(project: Path, cfg: config.Config, layout: Layout, save_split: bool
             errors.append(
                 f"{denied} contains pattern characters (* ? [ ] {{ }}), so agents cannot be denied it reliably; "
                 "use a path without them")
+    if cfg.agent_notes and not Path(cfg.agent_notes).is_file():
+        errors.append(f"agents.notes: {cfg.agent_notes} does not exist")
     for name in ("run_task", "check", "ingest"):
         command = getattr(cfg, name)
         if command and workspace.command_in_editable(command, project, cfg.editable, cfg.frozen):
@@ -145,6 +147,7 @@ class Ctx:
     lock: threading.Lock = field(default_factory=threading.Lock)
     step_began: float = 0.0   # time.monotonic() when the running step started
     tracker: progress.Tracker = field(default_factory=progress.Tracker)
+    notes_gone: bool = False  # the notes file went missing; warned once
 
     @property
     def main_wt(self) -> Path:
@@ -687,6 +690,21 @@ def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str
     return None, failure
 
 
+def _notes(ctx: Ctx) -> str | None:
+    """The owner's notes as they are now: read for each agent call, so they can be edited between rounds."""
+    path = ctx.cfg.agent_notes
+    if not path:
+        return None
+    try:
+        return Path(path).read_text()
+    except OSError:
+        with ctx.lock:
+            warn, ctx.notes_gone = not ctx.notes_gone, True
+        if warn:
+            _say(f"warning: the notes file {path} is gone; the agents get no notes until it is back")
+        return None
+
+
 def _shared(ctx: Ctx) -> list[Path]:
     """The folders agents read and only the framework writes."""
     return [ctx.rl.feedback, ctx.rl.history]
@@ -758,7 +776,8 @@ def _propose(ctx: Ctx) -> None:
         worktree = Path(c["worktree"])
         prompt = prompts.proposer_prompt(cfg, st.benchmark, memory, table, evidence, st.scores[-1],
                                          _eval_dir(st), ctx.rl.feedback, ctx.rl.history, out,
-                                         metrics=metrics, limits=cfg.constraints, used=st.metric_ratio)
+                                         metrics=metrics, limits=cfg.constraints, used=st.metric_ratio,
+                                         notes=_notes(ctx))
         manifest, failure = _agent(ctx, "proposer", prompt, worktree, out, {"RSI_SAMPLE": c["sample"]},
                                    agents.read_manifest, reset=lambda: workspace.clean(worktree))
         with ctx.lock:
@@ -830,7 +849,7 @@ def _screen(ctx: Ctx) -> None:
              "diff": workspace.diff_text(ctx.project, st.current_sha, c["sha"])}
             for c in survivors
         ]
-        prompt = prompts.screen_prompt(cfg, st.benchmark, memory, items, out)
+        prompt = prompts.screen_prompt(cfg, st.benchmark, memory, items, out, notes=_notes(ctx))
         samples = [c["sample"] for c in survivors]
         with agents.read_only(_shared(ctx)):
             verdicts, failure = _agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "screen"},
@@ -894,7 +913,7 @@ def _select(ctx: Ctx) -> None:
         out = ctx.agent_dir("select")
         _expect(ctx, agents=1)
         prompt = prompts.select_prompt(cfg, st.benchmark, memory, current,
-                                       baseline.table(cfg.pass_threshold), items, out)
+                                       baseline.table(cfg.pass_threshold), items, out, notes=_notes(ctx))
         samples = [c["sample"] for c in evaluated]
         with agents.read_only(_shared(ctx)):
             decision, failure = _agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "select"},

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from . import progress
@@ -64,6 +64,7 @@ class Config:
     agent_cli: str = "claude"            # which built-in agent command to use
     agent_model: str | None = None
     agent_effort: str | None = None
+    agent_notes: str | None = None      # the owner's notes for the agents; absolute once loaded from a file
     promotion_mode: str = "per_run"      # or "per_edit": one pull request per accepted edit
     draft: bool = False
     branch_prefix: str = "rsi/"
@@ -124,6 +125,7 @@ _SCHEMA = (
     ("agents", "cli", "agent_cli", str, "claude"),
     ("agents", "model", "agent_model", str, None),
     ("agents", "effort", "agent_effort", str, None),
+    ("agents", "notes", "agent_notes", str, None),
     ("promotion", "pull_request", "pull_request", bool, True),
     ("promotion", "mode", "promotion_mode", str, "per_run"),
     ("promotion", "draft", "draft", bool, False),
@@ -264,6 +266,10 @@ def load(path: Path) -> Config:
     if not path.is_file():
         raise ConfigError(f"config not found: {path}")
     try:
-        return parse(path.read_text())
+        cfg = parse(path.read_text())
     except ConfigError as error:
         raise ConfigError(f"{path}: {error}") from None
+    if cfg.agent_notes:
+        # Relative to the config's own folder, so it means the same file wherever rsi is started from.
+        cfg = replace(cfg, agent_notes=str(path.parent.resolve() / Path(cfg.agent_notes).expanduser()))
+    return cfg

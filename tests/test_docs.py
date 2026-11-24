@@ -113,6 +113,12 @@ class DocsTest(unittest.TestCase):
                            .replace("[progress]", MINIMAL_FOR_DOCS + "\n[progress]", 1))
         self.assertEqual(cfg.progress_events, "all")
 
+    def test_readme_and_template_document_agent_notes(self):
+        text = (ROOT / "README.md").read_text()
+        self.assertIn("**Notes for the agents.**", text)
+        self.assertIn('notes = "agent-notes.md"', text)
+        self.assertIn("# notes = ", cli.TEMPLATE)
+
     def test_template_mentions_progress(self):
         self.assertIn("# [progress]", cli.TEMPLATE)
         self.assertIn("# line = ", cli.TEMPLATE)

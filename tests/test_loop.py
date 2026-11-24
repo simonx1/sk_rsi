@@ -67,6 +67,14 @@ class ValidateTest(ToyCase):
         cfg = replace(self.cfg, proposer=None, selector=None)
         self.assertEqual(loop.validate(self.project, cfg, self.layout).warnings, [])
 
+    def test_notes_file_must_exist(self):
+        missing = self.tmp / "nowhere" / "notes.md"
+        v = loop.validate(self.project, replace(self.cfg, agent_notes=str(missing)), self.layout)
+        self.assertEqual(v.errors, [f"agents.notes: {missing} does not exist"])
+        missing.parent.mkdir()
+        missing.write_text("Never touch the deploy task.\n")
+        self.assertEqual(loop.validate(self.project, replace(self.cfg, agent_notes=str(missing)), self.layout).errors, [])
+
     def test_task_file_inside_the_repo(self):
         inside = self.project / "bench.jsonl"
         inside.write_text('{"id": "a"}\n{"id": "b"}\n')

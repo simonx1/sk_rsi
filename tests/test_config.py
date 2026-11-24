@@ -218,6 +218,26 @@ branch_prefix = "sk-rsi-"
         self.assertEqual(config.Config.from_dict(cfg.to_dict()), cfg)
 
 
+class NotesTest(unittest.TestCase):
+    def test_notes_path_is_relative_to_the_config(self):
+        self.assertIsNone(config.parse(MINIMAL).agent_notes)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp).resolve() / "proj"
+            folder.mkdir()
+            path = folder / "config.toml"
+            for given, expected in (("notes/agents.md", str(folder / "notes/agents.md")),
+                                    ("/abs/notes.md", "/abs/notes.md"),
+                                    ("~/notes.md", str(Path.home() / "notes.md"))):
+                with self.subTest(given=given):
+                    path.write_text(MINIMAL + f'\n[agents]\nnotes = "{given}"\n')
+                    self.assertEqual(config.load(path).agent_notes, expected)
+
+    def test_an_old_frozen_config_has_no_notes(self):
+        data = config.parse(MINIMAL).to_dict()
+        del data["agent_notes"]
+        self.assertIsNone(config.Config.from_dict(data).agent_notes)
+
+
 class LoadTest(unittest.TestCase):
     def test_missing_file(self):
         with self.assertRaises(config.ConfigError) as caught:

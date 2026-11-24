@@ -252,6 +252,13 @@ A denied action ends an `agy` session at once. What it wrote before still counts
 valid answer, the call is made once more. Any agent call that leaves no valid output is made once
 more, except after a timeout.
 
+**Notes for the agents.** `notes = "agent-notes.md"` under `[agents]` names a text file of standing
+notes from you: what is off limits and why, what has been measured, where to look. A relative path is
+relative to the config file's folder. The text is shown to the proposer and to the selector at both of
+its steps. It is read again for every agent call, so an edit reaches the next round without a restart.
+A run does not start when the file is missing; if it goes missing later, the loop warns once and goes
+on without it.
+
 ## Progress
 
 While `rsi run` works it keeps one live line at the bottom of the terminal, rewritten every few

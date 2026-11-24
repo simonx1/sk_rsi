@@ -64,6 +64,7 @@ max_infra_failure_rate = 0.3
 # cli = "agy"                # default "claude"; "agy" also needs model
 # model = "gemini-4-neon"
 # effort = "high"
+# notes = "agent-notes.md"   # the owner's standing notes for the agents, beside this file
 
 # The live progress line while `rsi run` works; see "Progress" in the README for the fields.
 # [progress]

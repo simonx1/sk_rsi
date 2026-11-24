@@ -88,6 +88,32 @@ class SelectorPromptTest(unittest.TestCase):
         self.assertIn("Root cause: new: weak retrieval", text)
 
 
+class NotesPromptTest(unittest.TestCase):
+    NOTES = "The deploy task is off limits.\nRuns vary by about 4%.\n"
+
+    def test_every_prompt_carries_the_notes(self):
+        item = SelectorPromptTest.ITEM
+        texts = {
+            "proposer": prompts.proposer_prompt(CFG, "toy-v1", MEMORY, TABLE, [], 33.33, "abc123", Path("/f"),
+                                                Path("/h"), Path("/o"), notes=self.NOTES),
+            "screen": prompts.screen_prompt(CFG, "toy-v1", MEMORY, [item], Path("/o"), notes=self.NOTES),
+            "select": prompts.select_prompt(CFG, "toy-v1", MEMORY, 33.33, TABLE, [item], Path("/o"), notes=self.NOTES),
+        }
+        for role, text in texts.items():
+            with self.subTest(role=role):
+                self.assertIn("# Notes from the project's owner", text)
+                self.assertIn("The deploy task is off limits.\nRuns vary by about 4%.", text)
+        proposer = texts["proposer"]
+        self.assertLess(proposer.index("# What you may change"), proposer.index("# Notes from the project's owner"))
+        self.assertLess(proposer.index("# Notes from the project's owner"), proposer.index("# Memory of earlier"))
+
+    def test_no_notes_no_section(self):
+        for text in (prompts.proposer_prompt(CFG, "toy-v1", MEMORY, TABLE, [], 33.33, "abc123", Path("/f"),
+                                             Path("/h"), Path("/o")),
+                     prompts.screen_prompt(CFG, "toy-v1", MEMORY, [SelectorPromptTest.ITEM], Path("/o"), notes="  \n")):
+            self.assertNotIn("Notes from the project's owner", text)
+
+
 class MeasuredGoalPromptTest(unittest.TestCase):
     ROWS = [{"task": "pr", "score": 0.5, "passes": True, "errors": 0, "summary": "13.3 min",
              "metrics": {"wall_s": 800.0, "cost_usd": 4.00}}]
