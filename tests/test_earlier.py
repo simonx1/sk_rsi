@@ -124,14 +124,14 @@ class NotKeptTest(unittest.TestCase):
         self.assertEqual(len(self.outcomes("R3", 0)[0]), 3)     # another run: all of R2's rounds
 
     def test_newest_first_across_runs_and_rounds(self):
-        for run in ("20261120-0900", "20261124-1818"):
+        for run in ("20261120-0900", "20261201-0930"):
             for round_no in (2, 10):
                 for sample in ("s2", "s1"):
                     self.candidate(run, round_no, sample, status="dropped", reason="x")
         folders = [f for f, _, _ in self.outcomes("20261125-0800")[0]]
         self.assertEqual(folders, [
-            "20261124-1818/history/round-10/s1", "20261124-1818/history/round-10/s2",
-            "20261124-1818/history/round-2/s1", "20261124-1818/history/round-2/s2",
+            "20261201-0930/history/round-10/s1", "20261201-0930/history/round-10/s2",
+            "20261201-0930/history/round-2/s1", "20261201-0930/history/round-2/s2",
             "20261120-0900/history/round-10/s1", "20261120-0900/history/round-10/s2",
             "20261120-0900/history/round-2/s1", "20261120-0900/history/round-2/s2",
         ])

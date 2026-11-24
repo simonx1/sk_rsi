@@ -275,7 +275,7 @@ seconds, and prints a line that stays for every finished task run and agent call
 the moment it happens:
 
 ```
-[rsi] 20261124-1818 round 2/5: measuring
+[rsi] 20261201-0930 round 2/5: measuring
 [rsi] round 2 · measuring · s2 · task-7 run 3/4: score 0.53 in 13m11s
 [rsi] round 2 · measuring · s2 · task-7 run 4/4 FAILED: exit code 3
 [rsi] round 2 · proposer s1: done in 9m12s
