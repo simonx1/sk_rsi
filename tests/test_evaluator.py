@@ -21,7 +21,7 @@ out = sys.argv[2]
 log = os.environ.get("CALL_LOG")
 if log:
     with open(log, "a") as fh:
-        fh.write(task["id"] + " " + os.environ["RSI_ROLLOUT"] + "\n")
+        fh.write(task["id"] + " " + os.environ["RSI_ROLLOUT"] + " " + os.path.basename(os.getcwd()) + "\n")
 mode = task.get("mode", "ok")
 if mode == "fail":
     sys.exit(2)
@@ -39,8 +39,14 @@ if mode == "raw":
 names = ("RSI_TASK_ID", "RSI_ROLLOUT", "RSI_MODEL", "RSI_BENCHMARK")
 summary = sys.argv[1] if mode == "where" else " ".join(os.environ[n] for n in names)
 score = task["scores"][int(os.environ["RSI_ROLLOUT"]) - 1] if "scores" in task else task["score"]
+result = {"score": score, "summary": summary}
+metrics = task.get("metrics")
+if isinstance(metrics, list):
+    metrics = metrics[int(os.environ["RSI_ROLLOUT"]) - 1]
+if metrics is not None:
+    result["metrics"] = metrics
 with open(os.path.join(out, "result.json"), "w") as fh:
-    json.dump({"score": score, "summary": summary}, fh)
+    json.dump(result, fh)
 print("ran", task["id"])
 '''
 
@@ -175,8 +181,8 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual(
             res.table(0.5),
             [
-                {"task": "a", "score": 1.0, "passes": True, "errors": 0, "summary": "a 1 model-a bench-v1"},
-                {"task": "b", "score": 0.0, "passes": False, "errors": 1, "summary": "exit code 2"},
+                {"task": "a", "score": 1.0, "passes": True, "errors": 0, "summary": "a 1 model-a bench-v1", "metrics": {}},
+                {"task": "b", "score": 0.0, "passes": False, "errors": 1, "summary": "exit code 2", "metrics": {}},
             ],
         )
 
@@ -188,6 +194,53 @@ class EvaluateTest(unittest.TestCase):
         results = evaluator.evaluate_many(self.cfg, [{"id": "a", "score": 1}], targets, "bench-v1")
         self.assertEqual({name: r.score() for name, r in results.items()}, {"x": 100.0, "y": 0.0})
         self.assertTrue((self.results / "y" / "a" / "r2" / "rollout.json").is_file())
+
+    def test_metrics_are_read_and_averaged(self):
+        res = self.run_tasks([
+            {"id": "a", "score": 1, "metrics": [{"wall_s": 600, "cost": 5.0}, {"wall_s": 700, "cost": 6.0}]},
+            {"id": "b", "score": 1, "metrics": {"wall_s": 100}},
+        ])
+        self.assertEqual(res.task_metrics(), {"a": {"wall_s": 650.0, "cost": 5.5}, "b": {"wall_s": 100.0}})
+        self.assertEqual(res.metric_means(), {"wall_s": 375.0, "cost": 5.5})
+        self.assertEqual(res.table(0.5)[0]["metrics"], {"wall_s": 650.0, "cost": 5.5})
+        self.assertEqual(res.rollouts[0].metrics, {"wall_s": 600.0, "cost": 5.0})
+
+    def test_metric_means_skip_rollouts_without_the_metric(self):
+        res = self.run_tasks([{"id": "a", "score": 1, "metrics": [{"accuracy_pct": 90.00}, None]}])
+        self.assertEqual(res.metric_means(), {"accuracy_pct": 90.00})
+
+    def test_failed_rollouts_report_no_metrics(self):
+        res = self.run_tasks([{"id": "a", "mode": "fail"}])
+        self.assertEqual((res.rollouts[0].metrics, res.task_metrics(), res.metric_means()), ({}, {}, {}))
+
+    def test_invalid_metrics_are_an_infra_failure(self):
+        raws = ['{"score": 1, "metrics": [1]}', '{"score": 1, "metrics": {"Wall": 1}}',
+                '{"score": 1, "metrics": {"wall_s": "600"}}', '{"score": 1, "metrics": {"wall_s": true}}',
+                '{"score": 1, "metrics": {"wall_s": NaN}}', '{"score": 1, "metrics": {"wall_s": 1e999}}',
+                '{"score": 1, "metrics": {"wall_s": 1' + "0" * 400 + "}}"]
+        task_list = [{"id": f"m{i}", "mode": "raw", "raw": raw} for i, raw in enumerate(raws)]
+        res = self.run_tasks(task_list, replace(self.cfg, rollouts=1))
+        for r in res.rollouts:
+            self.assertEqual((r.score, r.error, r.metrics),
+                             (0.0, "metrics must map names like wall_s to finite numbers", {}), r.task_id)
+
+    def test_old_marker_without_metrics_loads(self):
+        marker = self.results / "a" / "r1" / "rollout.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text('{"task_id": "a", "rollout": 1, "score": 1.0, "error": null, "summary": ""}')
+        res = self.run_tasks([{"id": "a", "score": 0}], replace(self.cfg, rollouts=1))
+        self.assertEqual((res.score(), res.rollouts[0].metrics), (100.0, {}))
+        self.assertFalse(self.call_log.exists())
+
+    def test_rollouts_are_submitted_round_robin(self):
+        x, y = self.tmp / "x", self.tmp / "y"
+        for folder in (x, y):
+            folder.mkdir()
+            (folder / "runner.py").write_text(RUNNER)
+        targets = {"x": (x, self.results / "x"), "y": (y, self.results / "y")}
+        evaluator.evaluate_many(replace(self.cfg, parallel=1), [{"id": "a", "score": 1}], targets, "bench-v1")
+        order = [tuple(line.split()[1:]) for line in self.call_log.read_text().splitlines()]
+        self.assertEqual(order, [("1", "x"), ("1", "y"), ("2", "x"), ("2", "y")])
 
     def test_no_tasks_scores_zero(self):
         res = self.run_tasks([])

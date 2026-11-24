@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import shutil
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import shell
@@ -15,6 +17,7 @@ from .config import Config
 from .state import Layout, write_json_atomic
 
 MARKER = "rollout.json"  # written last; a rollout directory without it is unfinished
+METRIC_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 @dataclass(frozen=True)
@@ -24,9 +27,28 @@ class Rollout:
     score: float
     error: str | None   # set for an infra failure: the command did not produce a valid result
     summary: str
+    metrics: dict = field(default_factory=dict)   # named measurements the task reported, e.g. {"wall_s": 640.0}
 
 
-def _read_result(out_dir: Path) -> tuple[float, str]:
+def _read_metrics(raw: object) -> dict[str, float]:
+    problem = ValueError("metrics must map names like wall_s to finite numbers")
+    if not isinstance(raw, dict):
+        raise problem
+    metrics = {}
+    for name, value in raw.items():
+        if not METRIC_NAME.match(name) or isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise problem
+        try:
+            number = float(value)
+        except OverflowError:
+            raise problem from None
+        if not math.isfinite(number):
+            raise problem
+        metrics[name] = number
+    return metrics
+
+
+def _read_result(out_dir: Path) -> tuple[float, str, dict[str, float]]:
     try:
         obj = json.loads((out_dir / "result.json").read_text())
     except FileNotFoundError:
@@ -43,7 +65,8 @@ def _read_result(out_dir: Path) -> tuple[float, str]:
     if not valid:
         raise ValueError("score must be a number from 0 to 1")
     summary = obj.get("summary", "")
-    return float(score), summary if isinstance(summary, str) else str(summary)
+    metrics = _read_metrics(obj["metrics"]) if "metrics" in obj else {}
+    return float(score), summary if isinstance(summary, str) else str(summary), metrics
 
 
 def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: Path, benchmark: str) -> Rollout:
@@ -77,17 +100,17 @@ def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: 
         os.unlink(task_path)
     (out_dir / "stdout.log").write_text(done.stdout)
     (out_dir / "stderr.log").write_text(done.stderr)
-    score, summary, error = 0.0, "", None
+    score, summary, error, metrics = 0.0, "", None, {}
     if done.timed_out:
         error = f"timeout after {cfg.task_timeout_s}s"
     elif done.returncode != 0:
         error = f"exit code {done.returncode}"
     else:
         try:
-            score, summary = _read_result(out_dir)
+            score, summary, metrics = _read_result(out_dir)
         except ValueError as problem:
             error = str(problem)
-    result = Rollout(task["id"], rollout, score, error, summary)
+    result = Rollout(task["id"], rollout, score, error, summary, metrics)
     write_json_atomic(marker, asdict(result))
     return result
 
@@ -120,8 +143,27 @@ class EvalResult:
             return 0.0
         return sum(1 for r in self.rollouts if r.error) / len(self.rollouts)
 
+    def task_metrics(self) -> dict[str, dict[str, float]]:
+        """Per task, the mean of each metric over the rollouts that ran and reported it."""
+        values: dict[str, dict[str, list[float]]] = {}
+        for r in self.rollouts:
+            if r.error is None:
+                for name, value in r.metrics.items():
+                    values.setdefault(r.task_id, {}).setdefault(name, []).append(value)
+        return {task_id: {name: sum(v) / len(v) for name, v in by_name.items()}
+                for task_id, by_name in values.items()}
+
+    def metric_means(self) -> dict[str, float]:
+        """Per metric, the mean of the task means over the tasks that have one."""
+        values: dict[str, list[float]] = {}
+        for by_name in self.task_metrics().values():
+            for name, value in by_name.items():
+                values.setdefault(name, []).append(value)
+        return {name: sum(v) / len(v) for name, v in values.items()}
+
     def table(self, threshold: float) -> list[dict]:
         per_task = self.task_scores()
+        metrics = self.task_metrics()
         rows = []
         for task_id in self.task_ids:
             mine = [r for r in self.rollouts if r.task_id == task_id]
@@ -132,6 +174,7 @@ class EvalResult:
                 "passes": per_task.get(task_id, 0.0) >= threshold,
                 "errors": sum(1 for r in mine if r.error),
                 "summary": next((n for n in notes if n), ""),
+                "metrics": metrics.get(task_id, {}),
             })
         return rows
 
@@ -150,9 +193,11 @@ def evaluate_many(
     pool = ThreadPoolExecutor(max_workers=cfg.parallel)
     try:
         futures = {}
-        for name, (checkout, results_dir) in targets.items():
+        # Round-robin: one rollout of every target before the next, so that targets compared
+        # with each other run at the same time.
+        for k in range(1, cfg.rollouts + 1):
             for task in task_list:
-                for k in range(1, cfg.rollouts + 1):
+                for name, (checkout, results_dir) in targets.items():
                     out_dir = results_dir / task["id"] / f"r{k}"
                     futures[pool.submit(run_rollout, cfg, task, k, checkout, out_dir, benchmark)] = name
         for future in as_completed(futures):
