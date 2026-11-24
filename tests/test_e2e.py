@@ -524,6 +524,21 @@ class PairedTest(ToyCase):
                          (16.67, 33.33, ["t03", "t05"]))
         self.assertEqual((st.heldout["start"], st.heldout["end"]), (33.33, 66.67))
 
+    def test_pairing_decides_whether_a_real_gain_is_seen(self):
+        for paired, expected in ((False, None), (True, "s1")):
+            with self.subTest(paired=paired):
+                tmp = self.tmp / f"paired-{paired}"
+                self.tmp, self.home = tmp, tmp / "home"
+                os.environ["RSI_HOME"] = str(self.home)
+                project = self.make_toy(tasks_extra=f"paired = {str(paired).lower()}", rounds=1, candidates=1,
+                                        budget_extra="min_gain = 1")
+                self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 0.5, ("heldout_end", 1): 1.0})
+                st = loop.run(project)
+                self.assertEqual(st.rounds_log[0]["accepted"], expected)
+                if not paired:  # the candidate's 33.33 is compared with a baseline measured before the machines slowed
+                    self.assertTrue(st.rounds_log[0]["reason"].startswith(
+                        "guard: s1 gained 0.00 points, less than the 1.00 required"), st.rounds_log[0]["reason"])
+
     def test_the_next_round_reads_the_newest_results(self):
         project = self.make_toy(tasks_extra="paired = true")
         st = loop.run(project)
@@ -585,6 +600,107 @@ class PairedTest(ToyCase):
         self.assertEqual((st.heldout["start"], st.heldout["end"]), (33.33, 83.33))
         ran = call_log.read_text().splitlines()
         self.assertEqual(len(ran), len(set(ran)))
+
+
+class LimitsTest(ToyCase):
+    """The toy with metrics: `rules` (rule lines, 2 at the start) and `labels` (distinct labels, 2)."""
+
+    @staticmethod
+    def limit(metric, **bound):
+        (key, value), = bound.items()
+        return f'[[constraints]]\nmetric = "{metric}"\n{key} = {value}'
+
+    def one_candidate(self, edits, **manifest):
+        path = self.tmp / "one.json"
+        plan = {"edits": edits, "manifest": {"root_cause": {"new": "a"}, "what": "An edit.", "predicted": [],
+                                             "risk": "none", **manifest}}
+        path.write_text(json.dumps({"proposer": {"0": {"s1": plan}}, "screen": {"0": {"s1": True}},
+                                    "select": {"0": "s1"}}))
+        self.use_script(str(path))
+
+    def test_a_limit_overrides_the_selector(self):
+        project = self.make_toy(metrics=True, rounds=1, candidates=1, tail=self.limit("rules", max_increase_pct=60))
+        st = loop.run(project)
+        entry = st.rounds_log[0]
+        self.assertIsNone(entry["accepted"])
+        self.assertTrue(entry["reason"].startswith("guard: s1 is past a limit: rules +100.00% of +60.00% allowed"),
+                        entry["reason"])
+        result = history(st, 0, "s1/result.json")
+        self.assertEqual(result["limits"][0]["state"], "over")
+        self.assertEqual(result["metrics"], {"rules": 4.0, "labels": 2.0})
+        self.assertEqual(result["observed"], {"rules": 100.0, "labels": 0.0})
+        self.assertEqual(st.metric_ratio, {})
+
+    def test_a_limit_is_cumulative_across_rounds(self):
+        project = self.make_toy(metrics=True, tail=self.limit("rules", max_increase_pct=120))
+        st = loop.run(project)
+        self.assertEqual([e["accepted"] for e in st.rounds_log], ["s1", None])
+        self.assertTrue(st.rounds_log[1]["reason"].startswith(
+            "guard: s1 is past a limit: rules +150.00% of +120.00% allowed"), st.rounds_log[1]["reason"])
+        self.assertEqual(st.metric_ratio, {"rules": 2.0})
+        prompt = (Layout("toy").run(st.run).agents / "round-1" / "s1" / "prompt.md").read_text()
+        self.assertIn("- rules may rise at most 120.00% in this run; +100.00% used", prompt)
+        self.assertIn("- rules: 4.00", prompt)
+
+    def test_a_limit_of_zero(self):
+        zero = self.limit("labels", max_decrease_pct=0)
+        project = self.make_toy(metrics=True, rounds=1, candidates=1, tail=zero)
+        self.one_candidate([{"path": "rules.txt", "write": "crash => bug\nerror => bug\n"}])  # labels 2 -> 1
+        st = loop.run(project)
+        self.assertTrue(st.rounds_log[0]["reason"].startswith(
+            "guard: s1 is past a limit: labels -50.00% of -0.00% allowed"), st.rounds_log[0]["reason"])
+        self.assertIsNone(st.rounds_log[0]["accepted"])
+
+    def test_a_limit_of_zero_allows_no_change(self):
+        project = self.make_toy(metrics=True, rounds=1, candidates=1, tail=self.limit("labels", max_decrease_pct=0))
+        st = loop.run(project)  # script.json: labels stay at 2
+        self.assertEqual(st.rounds_log[0]["accepted"], "s1")
+
+    def test_minimum_gain(self):
+        project = self.make_toy(rounds=1, candidates=1, budget_extra="min_gain = 40")
+        st = loop.run(project)
+        self.assertIsNone(st.rounds_log[0]["accepted"])
+        self.assertTrue(st.rounds_log[0]["reason"].startswith(
+            "guard: s1 gained 33.34 points, less than the 40.00 required"), st.rounds_log[0]["reason"])
+        project_ok = None  # a gain at the minimum is enough
+        self.write_config(self.tmp / "project", rounds=1, candidates=1, budget_extra="min_gain = 33.34")
+        git(self.tmp / "project", "commit", "-q", "-am", "lower the minimum gain")
+        st = loop.run(self.tmp / "project")
+        self.assertEqual(st.rounds_log[0]["accepted"], "s1")
+
+    def test_expected_and_observed_reach_the_memory(self):
+        project = self.make_toy(metrics=True, rounds=1, candidates=1)
+        self.one_candidate([{"path": "rules.txt", "append": "charged => billing\nerror => bug\n"}],
+                           title="Add two keywords", expected={"rules": 100})
+        st = loop.run(project)
+        memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
+        attempt = memory["problems"][0]["attempts"][0]
+        self.assertEqual(attempt["expected"], {"rules": 100.0})
+        self.assertEqual(attempt["observed"], {"rules": 100.0, "labels": 0.0})
+        self.assertEqual(attempt["metrics_before"], {"rules": 2.0, "labels": 2.0})
+        self.assertEqual(attempt["metrics_after"], {"rules": 4.0, "labels": 2.0})
+        entry = st.rounds_log[0]
+        self.assertEqual((entry["title"], entry["risk"], entry["runs"]), ("Add two keywords", "none", 1))
+        self.assertEqual(entry["sha"], git(project, "rev-parse", f"{st.branch}~1"))
+        self.assertEqual(entry["observed"], {"rules": 100.0, "labels": 0.0})
+        log = git(project, "show", f"{st.branch}:.rsi/log.md")
+        self.assertIn("| s1: An edit. (rules +100.00%, labels +0.00%) |", log)
+
+    def test_a_project_without_metrics_keeps_its_memory_format(self):
+        project = self.make_toy(rounds=1, candidates=1)
+        st = loop.run(project)
+        memory = json.loads(git(project, "show", f"{st.branch}:.rsi/sim.json"))
+        attempt = memory["problems"][0]["attempts"][0]
+        for key in ("expected", "observed", "metrics_before", "metrics_after"):
+            self.assertNotIn(key, attempt)
+
+    def test_heldout_limits_in_paired_mode(self):
+        project = self.make_toy(metrics=True, tasks_extra="paired = true",
+                                tail=self.limit("rules", max_increase_pct=200))
+        st = loop.run(project)
+        self.assertEqual([e["accepted"] for e in st.rounds_log], ["s1", "s1"])
+        status = st.heldout["limits"][0]
+        self.assertEqual((status["metric"], status["total_pct"], status["state"]), ("rules", 150.0, "ok"))
 
 
 class ContinuationTest(ToyCase):

@@ -152,3 +152,13 @@ class RenderTest(unittest.TestCase):
         self.assertIn("r1 round 0 (b-v1, m): Add a completion gate", text)
         self.assertIn("predicted t3, t4; fixed t3; missed t4; regressed none", text)
         self.assertIn("0.00 -> 50.00", text)
+        self.assertNotIn("expected", text)
+
+    def test_expected_and_measured_changes(self):
+        memory = sim.empty()
+        sim.record_attempt(memory, {"new": "too few workers"}, attempt(
+            expected={"rules": 100.0}, observed={"rules": 100.0, "labels": 0.0}))
+        sim.record_attempt(memory, {"id": "P1"}, attempt(round_no=1, observed={"wall_s": -25.00}))
+        text = sim.render_text(memory)
+        self.assertIn("    expected rules +100.00%; measured rules +100.00%, labels +0.00%", text)
+        self.assertIn("    measured wall_s -25.00%", text)

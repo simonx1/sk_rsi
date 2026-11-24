@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import config, loop, outcomes, project as projects, promote, sim, tasks, workspace
+from . import config, loop, measure, outcomes, project as projects, promote, sim, tasks, workspace
 from .state import Layout, LockError, RunState
 
 TEMPLATE = """\
@@ -103,6 +103,11 @@ def _status_lines(st: RunState, layout: Layout) -> list[str]:
         else:
             end = f"{st.heldout['end']:.2f}" if "end" in st.heldout else "not scored yet"
             lines.append(f"Held-out: {st.heldout['start']:.2f} → {end}")
+    constraints = config.Config.from_dict(st.config).constraints if st.config.get("constraints") else ()
+    if constraints:
+        lines.append("Limits: " + "; ".join(measure.describe(s) for s in measure.used_status(constraints, st.metric_ratio)))
+    if st.heldout.get("limits"):
+        lines.append("Held-out limits: " + "; ".join(measure.describe(s) for s in st.heldout["limits"]))
     if st.promoted:
         lines += _promotion_lines(st.promoted)
     lines.append(f"Pending tasks from live outcomes: {tasks.pending_count(layout)}")

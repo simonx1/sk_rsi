@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
+import re
 import shlex
 import stat
 from dataclasses import dataclass
@@ -57,6 +59,9 @@ def builtin_command(cli: str, model: str | None, effort: str | None, timeout_s: 
     if model:
         return DEFAULT_COMMAND.replace("claude -p ", f"claude -p --model {shlex.quote(model)} ", 1)
     return DEFAULT_COMMAND
+
+
+METRIC_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class AgentOutputError(Exception):
@@ -211,11 +216,25 @@ def validate_manifest(obj: object) -> dict:
     risk = obj.get("risk", "")
     if not isinstance(risk, str):
         raise AgentOutputError("risk must be text")
+    title = obj.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip() or len(title.strip()) > 72:
+            raise AgentOutputError("title must be text of at most 72 characters")
+        title = title.strip()
+    expected = obj.get("expected", {})
+    valid = isinstance(expected, dict) and all(
+        isinstance(name, str) and METRIC_NAME.match(name)
+        and isinstance(change, (int, float)) and not isinstance(change, bool) and math.isfinite(change)
+        for name, change in expected.items())
+    if not valid:
+        raise AgentOutputError("expected must map metric names to the percent change you expect, as numbers")
     return {
         "root_cause": {key: value.strip()},
         "what": what.strip(),
         "predicted": list(dict.fromkeys(predicted)),
         "risk": risk,
+        "title": title,
+        "expected": {name: float(change) for name, change in expected.items()},
     }
 
 

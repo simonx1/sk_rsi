@@ -155,8 +155,21 @@ class ManifestTest(unittest.TestCase):
     def test_normalised(self):
         self.assertEqual(agents.validate_manifest(self.GOOD), {
             "root_cause": {"new": "premature completion"}, "what": "add a gate",
-            "predicted": ["t1", "t2"], "risk": "may block finished work",
+            "predicted": ["t1", "t2"], "risk": "may block finished work", "title": None, "expected": {},
         })
+
+    def test_title_and_expected(self):
+        got = agents.validate_manifest({"root_cause": {"id": "P1"}, "what": "x", "title": " Use 24 workers ",
+                                        "expected": {"wall_s": -20, "cost_usd": 6}})
+        self.assertEqual((got["title"], got["expected"]), ("Use 24 workers", {"wall_s": -20.0, "cost_usd": 6.0}))
+        base = {"root_cause": {"id": "P1"}, "what": "x"}
+        for extra, fragment in (({"title": "x" * 73}, "title"), ({"title": 3}, "title"), ({"title": "  "}, "title"),
+                                ({"expected": [1]}, "expected"), ({"expected": {"Wall": 1}}, "expected"),
+                                ({"expected": {"wall_s": "x"}}, "expected"), ({"expected": {"wall_s": True}}, "expected"),
+                                ({"expected": {"wall_s": float("inf")}}, "expected")):
+            with self.assertRaises(agents.AgentOutputError, msg=str(extra)) as caught:
+                agents.validate_manifest({**base, **extra})
+            self.assertIn(fragment, str(caught.exception))
 
     def test_optional_fields_default(self):
         got = agents.validate_manifest({"root_cause": {"id": "P3"}, "what": "x"})

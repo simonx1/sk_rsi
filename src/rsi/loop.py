@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import agents, config, evaluator, outcomes, prompts, shell, sim, tasks, workspace
+from . import agents, config, evaluator, measure, outcomes, prompts, shell, sim, tasks, workspace
 from . import project as projects
 from . import promote as promote_mod
 from .state import Layout, Lock, RunLayout, RunState, read_json
@@ -443,6 +443,9 @@ def _heldout_paired(ctx: Ctx) -> None:
     start = results.get("start", final)
     st.heldout = {"start": start.score(), "end": final.score(),
                   "metrics_start": start.metric_means(), "metrics_end": final.metric_means()}
+    # The limits once more, on this independent measurement of start against final: the run's final total.
+    st.heldout["limits"] = measure.limit_status(ctx.cfg.constraints, {}, st.heldout["metrics_start"],
+                                                st.heldout["metrics_end"])
 
 
 def _promote(ctx: Ctx) -> None:
@@ -547,7 +550,7 @@ def _write_history(ctx: Ctx) -> None:
     """Save every candidate of this round, accepted or not, where later rounds can read it."""
     st = ctx.state
     keys = ("sample", "status", "reason", "sha", "files", "score", "fixed", "missed", "regressed",
-            "passed", "total", "table")
+            "passed", "total", "table", "metrics", "observed", "limits")
     for c in st.candidates:
         folder = ctx.hist() / c["sample"]
         folder.mkdir(parents=True, exist_ok=True)
@@ -589,7 +592,9 @@ def _ingest(ctx: Ctx) -> None:
 def _propose(ctx: Ctx) -> None:
     st, cfg = ctx.state, ctx.cfg
     memory = _load_sim(ctx)
-    table = _evolve_now(ctx).table(cfg.pass_threshold)
+    current = _evolve_now(ctx)
+    table = current.table(cfg.pass_threshold)
+    metrics = current.metric_means()
     evidence = _read_jsonl(ctx.hist() / "evidence.jsonl")
 
     # Worktrees are created one at a time: concurrent `git worktree add` calls can collide.
@@ -605,7 +610,8 @@ def _propose(ctx: Ctx) -> None:
         out = ctx.agent_dir(c["sample"])
         worktree = Path(c["worktree"])
         prompt = prompts.proposer_prompt(cfg, st.benchmark, memory, table, evidence, st.scores[-1],
-                                         _eval_dir(st), ctx.rl.feedback, ctx.rl.history, out)
+                                         _eval_dir(st), ctx.rl.feedback, ctx.rl.history, out,
+                                         metrics=metrics, limits=cfg.constraints, used=st.metric_ratio)
         manifest, failure = _agent(ctx, "proposer", prompt, worktree, out, {"RSI_SAMPLE": c["sample"]},
                                    agents.read_manifest, reset=lambda: workspace.clean(worktree))
         with ctx.lock:
@@ -711,13 +717,17 @@ def _evaluate(ctx: Ctx) -> None:
                            "reason": "the round's baseline had failed runs; nothing can be compared"}
         else:
             st.eval_dir = fresh
-    before = _evolve_now(ctx).passing(threshold)
+    baseline = _evolve_now(ctx)
+    before, base_metrics = baseline.passing(threshold), baseline.metric_means()
     for c in kept:
         result = results[c["sample"]]
         fixed, missed, regressed = sim.outcome(c["manifest"]["predicted"], before, result.passing(threshold))
         passed, total = result.passed_total(threshold)
+        metrics = result.metric_means()
         c.update(status="evaluated", score=result.score(), fixed=fixed, missed=missed,
-                 regressed=regressed, passed=passed, total=total, table=result.table(threshold))
+                 regressed=regressed, passed=passed, total=total, table=result.table(threshold),
+                 metrics=metrics, observed=measure.changes(base_metrics, metrics),
+                 limits=measure.limit_status(ctx.cfg.constraints, st.metric_ratio, base_metrics, metrics))
     st.step = "select"
 
 
@@ -736,8 +746,8 @@ def _select(ctx: Ctx) -> None:
         items = []
         for c in evaluated:
             result = evaluator.evaluate(cfg, ctx.evolve, Path(c["worktree"]), ctx.rl.feedback / c["sha"], st.benchmark)
-            items.append({**{k: c[k] for k in ("sample", "manifest", "files", "score", "fixed", "missed", "regressed")},
-                          "table": result.table(cfg.pass_threshold)})
+            keys = ("sample", "manifest", "files", "score", "fixed", "missed", "regressed", "metrics", "observed", "limits")
+            items.append({**{k: c.get(k) for k in keys}, "table": result.table(cfg.pass_threshold)})
         out = ctx.agent_dir("select")
         prompt = prompts.select_prompt(cfg, st.benchmark, memory, current,
                                        baseline.table(cfg.pass_threshold), items, out)
@@ -750,8 +760,18 @@ def _select(ctx: Ctx) -> None:
         else:
             accept, reason = decision
         if accept:
+            # Rules in code that override the selector, in this order: limits, minimum gain, tolerance.
             chosen = next(c for c in evaluated if c["sample"] == accept)
-            if _below_tolerance(current, chosen["score"], cfg.tolerance):
+            blocked = measure.blocking(chosen.get("limits") or [])
+            gained = round(chosen["score"] - current, 2)
+            said = f"; the selector's reason was: {reason}"
+            if blocked:
+                reason = f"guard: {accept} is past a limit: {measure.describe(blocked[0])}{said}"
+                accept = None
+            elif cfg.min_gain is not None and gained < cfg.min_gain:
+                reason = f"guard: {accept} gained {gained:.2f} points, less than the {cfg.min_gain:.2f} required{said}"
+                accept = None
+            elif _below_tolerance(current, chosen["score"], cfg.tolerance):
                 reason = (f"guard: {accept} scored {chosen['score']:.2f}, more than {cfg.tolerance:.2f} "
                           f"below the current {current:.2f}; the selector's reason was: {reason}")
                 accept = None
@@ -769,12 +789,25 @@ def _append_log(ctx: Ctx, chosen: dict | None, pid: str | None, before: float, a
         return
     if chosen:
         accepted = f"{chosen['sample']}: {_first_line(chosen['manifest']['what'])}".replace("|", "/")
+        if chosen.get("observed"):
+            accepted += " (" + ", ".join(f"{name} {change:+.2f}%" for name, change in chosen["observed"].items()) + ")"
         cells = [accepted, pid or "", ", ".join(chosen["fixed"]), ", ".join(chosen["missed"]),
                  ", ".join(chosen["regressed"])]
     else:
         cells = ["none", "", "", "", ""]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{text}{start} {before:.2f} | {after:.2f} | " + " | ".join(cells) + " |\n")
+
+
+def _measured_fields(chosen: dict, metrics_before: dict) -> dict:
+    """What an attempt in the memory says about measurements. Empty for a project that reports none."""
+    fields = {}
+    if chosen["manifest"].get("expected"):
+        fields["expected"] = chosen["manifest"]["expected"]
+    if chosen.get("metrics"):
+        fields.update(observed=chosen.get("observed", {}), metrics_before=metrics_before,
+                      metrics_after=chosen["metrics"])
+    return fields
 
 
 def _record(ctx: Ctx) -> None:
@@ -784,6 +817,7 @@ def _record(ctx: Ctx) -> None:
     # With paired measurement the round's baseline is the fresh result, when there is a valid one.
     before = after = _evolve_now(ctx).score() if cfg.paired else st.scores[-1]
     chosen, pid, opened = None, None, False
+    metrics_before = _evolve_now(ctx).metric_means()
     if accept:
         chosen = next(c for c in st.candidates if c["sample"] == accept)
         after = chosen["score"]
@@ -800,6 +834,7 @@ def _record(ctx: Ctx) -> None:
                 "passed": chosen["passed"], "total": chosen["total"],
                 "score_before": before, "score_after": after,
                 "domain": {"benchmark": st.benchmark, "model": cfg.model},
+                **_measured_fields(chosen, metrics_before),
             })
             sim.save(ctx.sim_path, memory)
         problem = sim.problem(memory, pid)
@@ -817,7 +852,24 @@ def _record(ctx: Ctx) -> None:
         "regressed": chosen["regressed"] if chosen else [],
         "reason": st.decision["reason"],
         "dropped": [{"sample": c["sample"], "reason": c["reason"]} for c in _with_status(ctx, "dropped")],
+        # what a pull request for this edit needs
+        "sha": chosen["sha"] if chosen else None,
+        "title": chosen["manifest"].get("title") if chosen else None,
+        "risk": chosen["manifest"]["risk"] if chosen else None,
+        "expected": chosen["manifest"].get("expected", {}) if chosen else {},
+        "observed": chosen.get("observed", {}) if chosen else {},
+        "metrics_before": metrics_before if chosen else {},
+        "metrics_after": chosen.get("metrics", {}) if chosen else {},
+        "limits": chosen.get("limits", []) if chosen else [],
+        "runs": cfg.rollouts,
     })
+    if chosen:
+        # Each accepted edit uses up part of every limit it moves.
+        for status in chosen.get("limits") or []:
+            name = status["metric"]
+            if status["total_pct"] is not None:
+                st.metric_ratio[name] = (st.metric_ratio.get(name, 1.0)
+                                         * chosen["metrics"][name] / metrics_before[name])
     for c in st.candidates:
         if c.get("worktree"):
             workspace.remove_worktree(ctx.project, Path(c["worktree"]))

@@ -213,6 +213,7 @@ class RunState:
     promoted: dict | None = None
     external: bool = False    # the config, memory and log live under RSI_HOME, not in the repository
     eval_dir: str = ""        # folder under feedback/ with the current harness's newest results; "" means eval_sha
+    metric_ratio: dict = field(default_factory=dict)   # per limited metric: product of candidate/baseline over accepted rounds
 
     def save(self, path: Path) -> None:
         write_json_atomic(path, asdict(self))

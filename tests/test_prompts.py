@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from rsi import prompts, sim
+from rsi.config import Constraint
 from tests.helpers import minimal_config
 
 MEMORY = sim.empty()
@@ -85,3 +86,42 @@ class SelectorPromptTest(unittest.TestCase):
         item = dict(self.ITEM, manifest=dict(self.ITEM["manifest"], root_cause={"new": "weak retrieval"}))
         text = prompts.screen_prompt(CFG, "toy-v1", MEMORY, [item], Path("/state/out"))
         self.assertIn("Root cause: new: weak retrieval", text)
+
+
+class MeasuredGoalPromptTest(unittest.TestCase):
+    ROWS = [{"task": "pr", "score": 0.5, "passes": True, "errors": 0, "summary": "13.3 min",
+             "metrics": {"wall_s": 800.0, "cost_usd": 4.00}}]
+    LIMITS = (Constraint("cost_usd", "increase", 10.0), Constraint("accuracy_pct", "decrease", 0.0))
+
+    def test_proposer_prompt_shows_measurements_and_limits(self):
+        text = prompts.proposer_prompt(
+            CFG, "bench-v1", MEMORY, self.ROWS, [], 50.0, "abc123", Path("/s/feedback"), Path("/s/history"), Path("/s/out"),
+            metrics={"wall_s": 800.0, "cost_usd": 4.00}, limits=self.LIMITS, used={"cost_usd": 1.06})
+        self.assertIn("# Measurements and limits", text)
+        self.assertIn("- wall_s: 800.00", text)
+        self.assertIn("- cost_usd: 4.00", text)
+        self.assertIn("- cost_usd may rise at most 10.00% in this run; +6.00% used", text)
+        self.assertIn("- accuracy_pct may fall at most 0.00% in this run; +0.00% used", text)
+        self.assertIn("| Task | Score | Passes | Run errors | wall_s | cost_usd | Note |", text)
+        self.assertIn("| pr | 0.50 | yes | 0 | 800.00 | 4.00 | 13.3 min |", text)
+        self.assertIn('"title": "A short name for the edit"', text)
+        self.assertIn('"expected": {"wall_s": -10}', text)
+
+    def test_a_project_without_metrics_sees_no_such_section(self):
+        text = prompts.proposer_prompt(CFG, "toy-v1", MEMORY, TABLE, [], 33.33, "abc123",
+                                       Path("/s/feedback"), Path("/s/history"), Path("/s/out"))
+        self.assertNotIn("# Measurements and limits", text)
+        self.assertNotIn('"expected"', text)
+
+    def test_select_prompt_shows_each_candidates_measurements(self):
+        item = {"sample": "s1", "manifest": {"root_cause": {"id": "P1"}, "what": "More workers", "predicted": [],
+                                             "risk": "", "title": "Use 24 workers", "expected": {"wall_s": -20.0}},
+                "files": ["conf/run.yml"], "score": 61.0, "fixed": [], "missed": [], "regressed": [], "table": self.ROWS,
+                "metrics": {"wall_s": 600.0, "cost_usd": 4.24}, "observed": {"wall_s": -25.00, "cost_usd": 6.00},
+                "limits": [{"metric": "cost_usd", "direction": "increase", "allowed_pct": 10.0, "total_pct": 6.00, "state": "ok"},
+                           {"metric": "accuracy_pct", "direction": "decrease", "allowed_pct": 0.0, "total_pct": None, "state": "missing"}]}
+        text = prompts.select_prompt(CFG, "bench-v1", MEMORY, 50.0, self.ROWS, [item], Path("/s/out"))
+        self.assertIn("Measured: wall_s 600.00 (-25.00%), cost_usd 4.24 (+6.00%)", text)
+        self.assertIn("Expected by the proposer: wall_s -20.00%", text)
+        self.assertIn("Limits: cost_usd +6.00% of +10.00% allowed; accuracy_pct was not reported by the candidate", text)
+        self.assertIn("Cannot be accepted: accuracy_pct was not reported by the candidate", text)

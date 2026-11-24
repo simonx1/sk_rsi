@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from . import measure
 from .config import Config
 
 # Yu et al., arXiv:2611.18856, Appendix D.2.
@@ -41,10 +42,34 @@ def _cell(value: object) -> str:
 
 
 def _table(rows: list[dict]) -> str:
-    lines = ["| Task | Score | Passes | Run errors | Note |", "|---|---|---|---|---|"]
+    """One row per task. Metrics the tasks reported get a column each, before the note."""
+    names = list(dict.fromkeys(name for row in rows for name in row.get("metrics", {})))
+    head = ["Task", "Score", "Passes", "Run errors", *names, "Note"]
+    lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for row in rows:
         passes = "yes" if row["passes"] else "no"
-        lines.append(f"| {row['task']} | {row['score']:.2f} | {passes} | {row['errors']} | {_cell(row['summary'])} |")
+        measured = [f"{row['metrics'][name]:.2f}" if name in row.get("metrics", {}) else "" for name in names]
+        cells = [row["task"], f"{row['score']:.2f}", passes, str(row["errors"]), *measured, _cell(row["summary"])]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
+def _measurements(metrics: dict[str, float], limits: tuple, used: dict[str, float]) -> str | None:
+    """What the current harness measures, and how much of each limit the run has used."""
+    if not metrics and not limits:
+        return None
+    lines = ["# Measurements and limits", ""]
+    if metrics:
+        lines.append("The tasks report these measurements. For the current harness, averaged over tasks and runs:")
+        lines.append("")
+        lines += [f"- {name}: {value:.2f}" for name, value in metrics.items()]
+    if limits:
+        lines += ["", "Limits, relative to the harness this run started from. An edit that takes a measurement "
+                      "past its limit cannot be accepted, whatever its score:", ""]
+        for status in measure.used_status(limits, used):
+            verb = "rise" if status["direction"] == "increase" else "fall"
+            lines.append(f"- {status['metric']} may {verb} at most {status['allowed_pct']:.2f}% in this run; "
+                         f"{status['total_pct']:+.2f}% used")
     return "\n".join(lines)
 
 
@@ -91,8 +116,20 @@ def proposer_prompt(
     feedback_dir: Path,
     history_dir: Path,
     out_dir: Path,
+    metrics: dict[str, float] | None = None,
+    limits: tuple = (),
+    used: dict[str, float] | None = None,
 ) -> str:
-    return "\n\n".join([
+    measured = _measurements(metrics or {}, limits, used or {})
+    extra_keys, extra_notes = "", ""
+    if measured:
+        extra_keys = (',\n  "title": "A short name for the edit",\n'
+                      '  "expected": {"wall_s": -10}')
+        extra_notes = (
+            "\n- `title`: optional, at most 72 characters; it names the edit where people review it.\n"
+            "- `expected`: optional. For any of the measurements above, the percent change you expect your "
+            "edit to make to it (negative means lower). It is recorded now and compared with what is measured.")
+    sections = [
         "# Your job\n\n"
         "You are improving a project's harness: the files that decide how well it does its tasks. "
         "Find a failure in the results below, work out its root cause, make one focused edit that "
@@ -120,15 +157,18 @@ def proposer_prompt(
         '  "root_cause": {"id": "P3"},\n'
         '  "what": "What you changed and why it should work",\n'
         '  "predicted": ["task-id"],\n'
-        '  "risk": "What could regress"\n'
+        f'  "risk": "What could regress"{extra_keys}\n'
         "}\n"
         "```\n\n"
         '- `root_cause`: `{"id": "<id>"}` when a problem in the memory explains the failure, '
         'otherwise `{"new": "<one sentence naming the root cause>"}`.\n'
         "- `predicted`: ids of evolve tasks that do not pass now and that your edit should make pass. "
         "Predictions are checked against the evaluation and recorded in the memory, so list only "
-        "what you expect. An empty list is allowed.",
-    ]) + "\n"
+        "what you expect. An empty list is allowed." + extra_notes,
+    ]
+    if measured:
+        sections.insert(-2, measured)   # before the live outcomes and the output contract
+    return "\n\n".join(sections) + "\n"
 
 
 def _candidate_header(item: dict) -> str:
@@ -141,7 +181,27 @@ def _candidate_header(item: dict) -> str:
         f"Predicted to fix: {', '.join(manifest['predicted']) or 'nothing named'}\n"
         f"Risk named by the proposer: {manifest['risk'] or 'none'}\n"
         f"Files changed: {', '.join(item['files'])}"
-    )
+    ) + _candidate_measurements(item)
+
+
+def _candidate_measurements(item: dict) -> str:
+    """Lines about what was measured for a candidate; empty for a project without metrics."""
+    lines = []
+    if item.get("metrics"):
+        observed = item.get("observed", {})
+        lines.append("Measured: " + ", ".join(
+            f"{name} {value:.2f}" + (f" ({observed[name]:+.2f}%)" if name in observed else "")
+            for name, value in item["metrics"].items()))
+    expected = item["manifest"].get("expected")
+    if expected:
+        lines.append("Expected by the proposer: " + ", ".join(f"{n} {c:+.2f}%" for n, c in expected.items()))
+    limits = item.get("limits") or []
+    if limits:
+        lines.append("Limits: " + "; ".join(measure.describe(s) for s in limits))
+        blocked = measure.blocking(limits)
+        if blocked:
+            lines.append("Cannot be accepted: " + "; ".join(measure.describe(s) for s in blocked))
+    return "".join("\n" + line for line in lines)
 
 
 def screen_prompt(cfg: Config, benchmark: str, memory: dict, items: list[dict], out_dir: Path) -> str:

@@ -112,6 +112,12 @@ class RunTest(CliCase):
         _, out, _ = self.rsi("run", "--dry-run", "--rounds", "0", "--project", project)
         self.assertIn("up to 18 task runs", out)
 
+    def test_status_shows_limits(self):
+        project = self.make_toy(metrics=True, tail='[[constraints]]\nmetric = "rules"\nmax_increase_pct = 120')
+        self.rsi("run", "--no-promote", "--project", project)
+        _, out, _ = self.rsi("status", "--project", project)
+        self.assertIn("Limits: rules +100.00% of +120.00% allowed", out)
+
     def test_dry_run_in_paired_mode(self):
         project = self.make_toy(tasks_extra="paired = true")
         code, out, _ = self.rsi("run", "--dry-run", "--project", project)

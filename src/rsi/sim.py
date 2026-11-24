@@ -152,6 +152,10 @@ def render_text(memory: dict) -> str:
                 f"    evolve {a['score_before']:.2f} -> {a['score_after']:.2f}, "
                 f"{a['passed']} of {a['total']} rollouts succeeded"
             )
+            parts = [f"{label} " + ", ".join(f"{name} {change:+.2f}%" for name, change in a[key].items())
+                     for key, label in (("expected", "expected"), ("observed", "measured")) if a.get(key)]
+            if parts:
+                lines.append("    " + "; ".join(parts))
     for old, new in memory["aliases"].items():
         lines.append(f"{old} was merged into {new}")
     return "\n".join(lines).strip()
