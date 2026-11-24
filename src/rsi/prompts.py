@@ -82,6 +82,22 @@ def notes_section(text: str | None) -> str | None:
             "been measured, where to look. Weigh them before anything else you infer.\n\n" + text.strip())
 
 
+def earlier_section(entries: list[dict], omitted: int, runs_dir: Path) -> str | None:
+    """Edits from earlier rounds and runs that were not kept, one line each; None when there are none."""
+    if not entries:
+        return None
+    lines = [f'- {e["folder"]} "{e["title"]}": {e["outcome"]}' for e in entries]
+    if omitted:
+        lines += ["", f"{omitted} older ones are not listed; they are in the same folders."]
+    return (
+        "# Earlier attempts that were not kept\n\n"
+        "Edits proposed in earlier rounds of this run and in earlier runs of this project that were "
+        "dropped, failed or not chosen, newest first. The memory above holds only edits that were kept. "
+        "Repeating one of these needs new evidence that it would now work. Each one's manifest, diff and "
+        f"result are in `{runs_dir}/<run>/history/round-<n>/<sample>/`.\n\n" + "\n".join(lines)
+    )
+
+
 def _patterns(patterns: tuple[str, ...]) -> str:
     return ", ".join(f"`{p}`" for p in patterns) if patterns else "none"
 
@@ -129,6 +145,7 @@ def proposer_prompt(
     limits: tuple = (),
     used: dict[str, float] | None = None,
     notes: str | None = None,
+    earlier: tuple[list[dict], int, Path] | None = None,
 ) -> str:
     measured = _measurements(metrics or {}, limits, used or {})
     extra_keys, extra_notes = "", ""
@@ -155,6 +172,7 @@ def proposer_prompt(
         "your changes are committed for you.",
         notes_section(notes),
         _memory_section(memory),
+        earlier_section(*earlier) if earlier else None,
         "# Current results on the evolve tasks\n\n"
         f"Harness score: {score:.2f} out of 100.\n\n"
         f"{_table(table)}\n\n"
@@ -216,7 +234,8 @@ def _candidate_measurements(item: dict) -> str:
 
 
 def screen_prompt(cfg: Config, benchmark: str, memory: dict, items: list[dict], out_dir: Path,
-                  notes: str | None = None) -> str:
+                  notes: str | None = None, earlier: tuple[list[dict], int, Path] | None = None) -> str:
+    shown = earlier_section(*earlier) if earlier else None
     candidates = "\n\n".join(
         f"## Candidate {item['sample']}\n\n{_candidate_header(item)}\n\n```diff\n{item['diff']}\n```"
         for item in items
@@ -224,13 +243,16 @@ def screen_prompt(cfg: Config, benchmark: str, memory: dict, items: list[dict], 
     return "\n\n".join(section for section in [
         "# Your job\n\n"
         "You are screening proposed harness edits before they are evaluated. Evaluation is expensive. "
-        "Drop a candidate only for a clear reason: it repeats an attempt the memory shows did not work "
-        "and brings no new evidence; it is tailored to one task in a way that will not generalise; "
+        "Drop a candidate only for a clear reason: it repeats an attempt that "
+        + ("the memory, or the list of earlier attempts below, shows did not work " if shown
+           else "the memory shows did not work ")
+        + "and brings no new evidence; it is tailored to one task in a way that will not generalise; "
         "its diff does not do what its manifest says; or it duplicates another candidate. "
         "When unsure, keep it. Do not edit any file except the output file.",
         _setting(cfg, benchmark),
         notes_section(notes),
         _memory_section(memory),
+        shown,
         f"# Candidates\n\n{candidates}",
         "# Output\n\n"
         f"Write `{out_dir}/screen.json` with one entry per candidate:\n\n"

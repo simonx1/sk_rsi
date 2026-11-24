@@ -114,6 +114,36 @@ class NotesPromptTest(unittest.TestCase):
             self.assertNotIn("Notes from the project's owner", text)
 
 
+class EarlierAttemptsPromptTest(unittest.TestCase):
+    ENTRIES = [{"run": "R1", "folder": "R1/history/round-0/s1", "sample": "s1", "title": "Cache the rules",
+                "outcome": "dropped: screened out: duplicates s2"}]
+
+    def test_section(self):
+        text = prompts.earlier_section(self.ENTRIES, 2, Path("/state/runs"))
+        self.assertTrue(text.startswith("# Earlier attempts that were not kept"))
+        self.assertIn('- R1/history/round-0/s1 "Cache the rules": dropped: screened out: duplicates s2', text)
+        self.assertIn("`/state/runs/<run>/history/round-<n>/<sample>/`", text)
+        self.assertIn("2 older ones are not listed", text)
+        self.assertNotIn("older ones", prompts.earlier_section(self.ENTRIES, 0, Path("/state/runs")))
+        self.assertIsNone(prompts.earlier_section([], 0, Path("/state/runs")))
+
+    def test_proposer_and_screen_prompts_carry_it(self):
+        earlier = (self.ENTRIES, 0, Path("/state/runs"))
+        proposer = prompts.proposer_prompt(CFG, "toy-v1", MEMORY, TABLE, [], 33.33, "abc123", Path("/f"),
+                                           Path("/h"), Path("/o"), earlier=earlier)
+        self.assertIn("# Earlier attempts that were not kept", proposer)
+        self.assertLess(proposer.index("# Memory of earlier"), proposer.index("# Earlier attempts that were not kept"))
+        self.assertLess(proposer.index("# Earlier attempts that were not kept"), proposer.index("# Current results"))
+        screen = prompts.screen_prompt(CFG, "toy-v1", MEMORY, [SelectorPromptTest.ITEM], Path("/o"), earlier=earlier)
+        self.assertIn("# Earlier attempts that were not kept", screen)
+        self.assertIn("it repeats an attempt that the memory, or the list of earlier attempts below, shows did "
+                      "not work and brings no new evidence", screen)
+        plain = prompts.screen_prompt(CFG, "toy-v1", MEMORY, [SelectorPromptTest.ITEM], Path("/o"))
+        self.assertNotIn("Earlier attempts that were not kept", plain)
+        self.assertNotIn("earlier attempts below", plain)
+        self.assertIn("it repeats an attempt that the memory shows did not work and brings", plain)
+
+
 class MeasuredGoalPromptTest(unittest.TestCase):
     ROWS = [{"task": "pr", "score": 0.5, "passes": True, "errors": 0, "summary": "13.3 min",
              "metrics": {"wall_s": 800.0, "cost_usd": 4.00}}]

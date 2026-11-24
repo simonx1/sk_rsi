@@ -29,6 +29,12 @@ The memory is given in full to the proposer and the selector every round. When t
 set changes, the memory carries over, so the agents know why each inherited edit exists and in which
 setting it was measured.
 
+Edits that were not kept are not in the memory, but they are not forgotten. The proposer and the
+selector, when it screens, are given a list of them from this run's earlier rounds and from earlier
+runs of the project, newest first, each with its outcome: why it was dropped, or what it scored and
+what the tasks reported. A repeat then needs new evidence. The list is read from the history folders
+and holds at most 30 edits.
+
 A run works on its own branch and ends with a pull request. Nothing reaches your main branch any
 other way.
 

@@ -978,6 +978,25 @@ class ContinuationTest(ToyCase):
         self.assertIn('"model": "model-a"', prompt)
         self.assertIn("Model that runs the tasks: model-b", prompt)
 
+    def test_a_second_run_is_shown_the_first_runs_attempts_that_were_not_kept(self):
+        project = self.make_toy()
+        first = loop.run(project)
+        dropped = [c for c in first.rounds_log[-1]["dropped"]]
+        self.assertTrue(dropped)
+        git(project, "merge", "-q", "--ff-only", first.branch)
+        (project / loop.CONFIG_PATH).write_text(self.config_text(rounds=1, candidates=1))
+        git(project, "commit", "-q", "-am", "one more round")
+        self.use_script("script_second_run.json")
+        second = loop.run(project)
+        prompt = (Layout("toy").run(second.run).agents / "round-0" / "s1" / "prompt.md").read_text()
+        self.assertIn("# Earlier attempts that were not kept", prompt)
+        folder = f"{first.run}/history/round-{first.rounds_log[-1]['round']}/{dropped[0]['sample']}"
+        self.assertIn(f"- {folder} ", prompt)
+        self.assertIn(dropped[0]["reason"][:40], prompt)
+        first_prompt = (Layout("toy").run(first.run).agents / "round-1" / "s1" / "prompt.md").read_text()
+        self.assertIn(f"- {first.run}/history/round-0/", first_prompt)   # the run's own earlier rounds too
+        self.assertNotIn(f"{first.run}/history/round-1/", first_prompt)
+
     def test_same_setting_records_no_hop(self):
         project = self.make_toy()
         first = loop.run(project)

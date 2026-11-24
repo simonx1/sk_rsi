@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from . import agents, config, evaluator, measure, outcomes, progress, prompts, shell, sim, tasks, workspace
+from . import agents, config, earlier, evaluator, measure, outcomes, progress, prompts, shell, sim, tasks, workspace
 from . import project as projects
 from . import promote as promote_mod
 from .state import Layout, Lock, RunLayout, RunState, read_json
@@ -702,6 +702,12 @@ def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str
     return None, failure
 
 
+def _earlier(ctx: Ctx) -> tuple[list[dict], int, Path]:
+    """Edits from this run's earlier rounds and from earlier runs that were not kept, for the prompts."""
+    entries, omitted = earlier.not_kept(ctx.layout, ctx.state.run, ctx.state.round)
+    return entries, omitted, ctx.layout.runs_dir
+
+
 def _notes(ctx: Ctx) -> str | None:
     """The owner's notes for this round.
 
@@ -787,6 +793,7 @@ def _propose(ctx: Ctx) -> None:
     metrics = current.metric_means()
     evidence = _read_jsonl(ctx.hist() / "evidence.jsonl")
     notes = _notes(ctx)
+    past = _earlier(ctx)
 
     # Worktrees are created one at a time: concurrent `git worktree add` calls can collide.
     waiting = [c for c in st.candidates if c["status"] == "new" and not c["agent_done"]]
@@ -804,7 +811,7 @@ def _propose(ctx: Ctx) -> None:
         prompt = prompts.proposer_prompt(cfg, st.benchmark, memory, table, evidence, st.scores[-1],
                                          _eval_dir(st), ctx.rl.feedback, ctx.rl.history, out,
                                          metrics=metrics, limits=cfg.constraints, used=st.metric_ratio,
-                                         notes=notes)
+                                         notes=notes, earlier=past)
         manifest, failure = _agent(ctx, "proposer", prompt, worktree, out, {"RSI_SAMPLE": c["sample"]},
                                    agents.read_manifest, reset=lambda: workspace.clean(worktree))
         with ctx.lock:
@@ -876,7 +883,7 @@ def _screen(ctx: Ctx) -> None:
              "diff": workspace.diff_text(ctx.project, st.current_sha, c["sha"])}
             for c in survivors
         ]
-        prompt = prompts.screen_prompt(cfg, st.benchmark, memory, items, out, notes=_notes(ctx))
+        prompt = prompts.screen_prompt(cfg, st.benchmark, memory, items, out, notes=_notes(ctx), earlier=_earlier(ctx))
         samples = [c["sample"] for c in survivors]
         with agents.read_only(_shared(ctx)):
             verdicts, failure = _agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "screen"},

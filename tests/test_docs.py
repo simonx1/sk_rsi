@@ -119,6 +119,12 @@ class DocsTest(unittest.TestCase):
         self.assertIn('notes = "agent-notes.md"', text)
         self.assertIn("# notes = ", cli.TEMPLATE)
 
+    def test_readme_explains_earlier_attempts(self):
+        text = (ROOT / "README.md").read_text()
+        how = " ".join(text[text.index("## How it works"):text.index("## Install")].split())
+        self.assertIn("Edits that were not kept", how)
+        self.assertIn("earlier runs", how)
+
     def test_template_mentions_progress(self):
         self.assertIn("# [progress]", cli.TEMPLATE)
         self.assertIn("# line = ", cli.TEMPLATE)

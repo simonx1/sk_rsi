@@ -1,0 +1,121 @@
+"""Earlier edits that were not kept, from every run of a project, for the agents' prompts.
+
+The memory keeps only edits that were accepted. A new run would otherwise know nothing about what
+earlier runs tried and why it failed. This reads the history folders the loop already writes for every
+round: each candidate's manifest and result, and the round's decision.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from .state import Layout
+
+OUTCOME_CHARS = 300
+TITLE_CHARS = 72
+NOTES_PER_CANDIDATE = 3
+UNDECIDED = "the run stopped before this round was decided"
+
+
+def _read(path: Path) -> object:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _cut(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _round_number(folder: Path) -> int | None:
+    name = folder.name
+    if not folder.is_dir() or not name.startswith("round-") or not name[6:].isdigit():
+        return None
+    return int(name[6:])
+
+
+def _title(manifest: dict) -> str:
+    title = manifest.get("title") or str(manifest.get("what") or "").split("\n", 1)[0]
+    return _cut(str(title), TITLE_CHARS) or "untitled"
+
+
+def _guard(decision: dict | None, sample: str) -> str | None:
+    """The guard that stopped this candidate after the selector chose it, if one did."""
+    reason = str((decision or {}).get("reason") or "")
+    if not reason.startswith(f"guard: {sample} "):
+        return None
+    return reason.split("; the selector's reason was", 1)[0]
+
+
+def _task_notes(table: list) -> list[str]:
+    rows = [row for row in table if isinstance(row, dict) and str(row.get("summary") or "").strip()]
+    rows.sort(key=lambda row: bool(row.get("passes")))   # failing tasks first; the sort keeps the order otherwise
+    return [f"{row.get('task')}: {row['summary']}" for row in rows[:NOTES_PER_CANDIDATE]]
+
+
+def _outcome(result: dict, decision: dict | None, before: float | None) -> str:
+    status, sample = result.get("status"), str(result.get("sample"))
+    if status == "dropped":
+        return f"dropped: {result.get('reason') or 'no reason given'}"
+    if status != "evaluated" or not isinstance(result.get("score"), (int, float)):
+        return UNDECIDED if decision is None else f"not kept ({status})"
+    parts = [f"scored {result['score']:.2f}" + (f" against {before:.2f} for the version it changed"
+                                                if before is not None else "")]
+    observed = result.get("observed") or {}
+    if isinstance(observed, dict) and observed:
+        parts.append("measured " + ", ".join(f"{name} {change:+.2f}%" for name, change in observed.items()
+                                             if isinstance(change, (int, float))))
+    if decision is None:
+        parts.append(UNDECIDED)
+    else:
+        guard = _guard(decision, sample)
+        if guard:
+            parts.append(guard)
+    parts += _task_notes(result.get("table") or [])
+    return "; ".join(parts)
+
+
+def not_kept(layout: Layout, run: str, round_no: int, limit: int = 30) -> tuple[list[dict], int]:
+    """Candidates with a manifest that were not accepted, newest first, without `run`'s rounds from
+    `round_no` on. Returns at most `limit` of them and how many more there are.
+
+    Each entry: {"run", "folder" (relative to the runs folder), "sample", "title", "outcome"}.
+    Unreadable files are skipped: an old or half-written folder must never stop a round.
+    """
+    runs_dir = layout.runs_dir
+    if not runs_dir.is_dir():
+        return [], 0
+    found: list[dict] = []
+    for run_folder in sorted((p for p in runs_dir.iterdir() if p.is_dir()), key=lambda p: p.name, reverse=True):
+        history = run_folder / "history"
+        if not history.is_dir():
+            continue
+        state = _read(layout.run(run_folder.name).state_file)
+        log = state.get("rounds_log", []) if isinstance(state, dict) else []
+        before = {entry.get("round"): entry.get("score_before") for entry in log if isinstance(entry, dict)}
+        rounds = sorted(((n, p) for p in history.iterdir() if (n := _round_number(p)) is not None), reverse=True)
+        for number, round_folder in rounds:
+            if run_folder.name == run and number >= round_no:
+                continue
+            decision = _read(round_folder / "decision.json")
+            decision = decision if isinstance(decision, dict) else None
+            for folder in sorted(p for p in round_folder.iterdir() if p.is_dir()):
+                manifest, result = _read(folder / "manifest.json"), _read(folder / "result.json")
+                if not isinstance(manifest, dict) or not isinstance(result, dict):
+                    continue
+                if decision is not None and decision.get("accept") == folder.name:
+                    continue   # kept: it is in the memory
+                score_before = before.get(number)
+                found.append({
+                    "run": run_folder.name,
+                    "folder": folder.relative_to(runs_dir).as_posix(),
+                    "sample": folder.name,
+                    "title": _title(manifest),
+                    "outcome": _cut(_outcome(result, decision,
+                                             score_before if isinstance(score_before, (int, float)) else None),
+                                    OUTCOME_CHARS),
+                })
+    return found[:limit], max(len(found) - limit, 0)
