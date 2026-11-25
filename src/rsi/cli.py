@@ -232,10 +232,10 @@ def _dry_run(proj: projects.Project, rounds: int | None) -> int:
                 print("  if it does not hold up, the selector's next choice is measured the same way, "
                       f"up to {cfg.fallbacks} more per round")
         print("  held-out scored once at the end, the starting and the final version together")
-    if cfg.aggregate == "median":
-        print("  a version's runs on a task are combined by their median")
     else:
         print(f"  held-out scored {'after every round' if cfg.heldout == 'every_round' else 'at the start and the end'}")
+    if cfg.aggregate == "median":
+        print("  a version's runs on a task are combined by their median")
     print(f"  each task run may take up to {cfg.task_timeout_s}s; at most {cfg.parallel} run at once")
     return 0
 

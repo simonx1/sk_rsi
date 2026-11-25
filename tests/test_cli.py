@@ -134,9 +134,13 @@ class RunTest(CliCase):
                       "up to 1 more per round", out)
         self.assertIn("a chosen change is measured once more beside the current version before it is kept", out)
         self.assertNotIn("median", out)
-        self.write_config(project, tasks_extra="aggregate = \"median\"")
-        self.assertIn("a version's runs on a task are combined by their median",
-                      self.rsi("run", "--dry-run", "--project", project)[1])
+        self.assertNotIn("held-out scored at the start and the end", out)      # paired: scored once, at the end
+        self.write_config(project, tasks_extra="paired = true\nconfirm = true\naggregate = \"median\"")
+        out = self.rsi("run", "--dry-run", "--project", project)[1]
+        self.assertIn("a version's runs on a task are combined by their median", out)
+        self.assertNotIn("held-out scored at the start and the end", out)
+        self.write_config(project, tasks_extra="paired = false\naggregate = \"median\"")
+        self.assertIn("held-out scored at the start and the end", self.rsi("run", "--dry-run", "--project", project)[1])
 
     def test_run_then_status(self):
         project = self.make_toy()

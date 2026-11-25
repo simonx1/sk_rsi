@@ -631,6 +631,15 @@ class PairedTest(ToyCase):
         decision = history(st, 0, "decision.json")
         self.assertEqual(set(decision["guards"]), {"s1"})
 
+    def test_a_later_choice_stopped_at_selection_does_not_change_the_reason(self):
+        self.TWO_CANDIDATES = dict(self.TWO_CANDIDATES, select={"0": {"accept": "s2", "then": ["s1"],
+                                                                      "reason": "s2 is smaller"}})
+        project = self.two_candidates(metrics=True, tail='[[constraints]]\nmetric = "rules"\nmax_increase_pct = 60')
+        st = loop.run(project, promote=False)
+        entry = st.rounds_log[0]
+        self.assertEqual((entry["accepted"], entry["reason"]), ("s2", "s2 is smaller"))
+        self.assertIn("s1", history(st, 0, "decision.json")["guards"])       # still on record for the list
+
     def test_a_first_choice_that_does_not_hold_up_falls_to_the_next(self):
         project = self.two_candidates(tasks_extra="paired = true\nconfirm = true", budget_extra="min_gain = 10")
         self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 1.0, ("confirm", 0): "0.5 /r0-s1"})

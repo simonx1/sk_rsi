@@ -988,7 +988,8 @@ def _select(ctx: Ctx) -> None:
                     guards[sample] = stopped
                 else:
                     eligible.append(sample)
-            st.decision = _decision(eligible[0] if eligible else None, reason, guards, eligible[1:])
+            st.decision = _decision(eligible[0] if eligible else None, reason, guards, eligible[1:],
+                                    order=[accept] + then)
             _write_history(ctx)
             st.step = "confirm" if st.decision["accept"] and cfg.confirm else "record"
             return
@@ -1015,19 +1016,28 @@ def _guard(cfg: config.Config, sample: str, chosen: dict, current: float, again:
 
 
 def _decision(accept: str | None, selector_reason: str, guards: dict[str, str], then: list[str],
-              tried: list[str] | None = None) -> dict:
-    """A round's decision: the candidate taken, why, each guard that stopped one, and what is left."""
-    stopped = "; ".join(guards.values())
-    if not guards:
+              tried: list[str] | None = None, order: list[str] | None = None) -> dict:
+    """A round's decision: the candidate taken, why, each guard that stopped one, and what is left.
+
+    `order` is the selector's ranking. The reason names only the guards that stopped a choice ranked
+    ahead of the one taken; a guard on a later choice is kept in `guards` but did not change the outcome.
+    """
+    rank = {sample: n for n, sample in enumerate(order or list(guards) + ([accept] if accept else []))}
+    if accept:
+        ahead = [text for sample, text in guards.items() if rank.get(sample, -1) < rank.get(accept, len(rank))]
+    else:
+        ahead = list(guards.values())
+    stopped = "; ".join(ahead)
+    if not ahead:
         reason = selector_reason
     elif accept:
         reason = f"{stopped}; so the selector's next choice, {accept}, was taken; the selector's reason was: {selector_reason}"
     else:
         reason = f"{stopped}; the selector's reason was: {selector_reason}"
     decision = {"accept": accept, "reason": reason}
-    # Only what a later step needs: the selector's own words, the guards, and the choices left.
+    # Only what a later step needs: the selector's own words and ranking, the guards, and the choices left.
     extra = {"selector_reason": selector_reason if reason != selector_reason else None, "guards": guards,
-             "then": then, "tried": tried}
+             "then": then, "tried": tried, "order": order if guards else None}
     decision.update({key: value for key, value in extra.items() if value})
     return decision
 
@@ -1070,7 +1080,7 @@ def _confirm(ctx: Ctx) -> None:
     if any(r.error for r in baseline.rollouts):
         guards[chosen["sample"]] = (f"guard: {chosen['sample']} was not measured again: the baseline had "
                                     "failed runs; nothing can be compared")
-        st.decision = _decision(None, selector_reason, guards, [], tried + [chosen["sample"]])
+        st.decision = _decision(None, selector_reason, guards, [], tried + [chosen["sample"]], decision.get("order"))
     else:
         st.eval_dir = base_dir
         _assess(ctx, chosen, result, baseline)
@@ -1084,10 +1094,10 @@ def _confirm(ctx: Ctx) -> None:
             left = list(decision.get("then") or [])
             if left and len(tried) <= cfg.fallbacks:
                 # The selector's next choice is confirmed the same way, in a step of its own.
-                st.decision = _decision(left[0], selector_reason, guards, left[1:], tried)
+                st.decision = _decision(left[0], selector_reason, guards, left[1:], tried, decision.get("order"))
                 _write_history(ctx)
                 return
-            st.decision = _decision(None, selector_reason, guards, [], tried)
+            st.decision = _decision(None, selector_reason, guards, [], tried, decision.get("order"))
     _write_history(ctx)
     st.step = "record"
 

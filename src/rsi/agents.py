@@ -268,16 +268,12 @@ def read_decision(out_dir: Path, samples: list[str]) -> tuple[str | None, str, l
     if accept is not None and accept not in samples:
         raise AgentOutputError(f"decision.json accepts {accept!r}, which is not an evaluated candidate")
     reason = obj.get("reason", "")
-    then = obj.get("then", [])
-    if accept is None:
-        then = []   # nothing chosen, so nothing to fall back to
-    if not isinstance(then, list) or not all(isinstance(s, str) for s in then):
-        raise AgentOutputError("decision.json 'then' must be a list of sample names")
-    for sample in then:
-        if sample not in samples:
-            raise AgentOutputError(f"decision.json 'then' names {sample!r}, which is not an evaluated candidate")
-        if sample == accept:
-            raise AgentOutputError(f"decision.json 'then' names {sample!r}, which it already accepts")
-    if len(set(then)) != len(then):
-        raise AgentOutputError("decision.json 'then' names a candidate twice")
+    # `then` is optional, so a bad one is cut down to what is usable rather than refused: refusing it
+    # would throw away the round's measurements for a field the round can do without.
+    given = obj.get("then")
+    then: list[str] = []
+    if accept is not None and isinstance(given, list):
+        for sample in given:
+            if isinstance(sample, str) and sample in samples and sample != accept and sample not in then:
+                then.append(sample)
     return accept, reason if isinstance(reason, str) else "", then

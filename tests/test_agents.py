@@ -238,10 +238,12 @@ class OutputFilesTest(unittest.TestCase):
         self.assertEqual(agents.read_decision(self.out, ["s1", "s2", "s3"]), ("s2", "r", ["s3", "s1"]))
         self.write("decision.json", json.dumps({"accept": None, "then": ["s1"]}))
         self.assertEqual(agents.read_decision(self.out, ["s1"]), (None, "", []))   # nothing chosen: no fallbacks
-        for then, fragment in ((["s2"], "s2"), (["s7"], "s7"), (["s3", "s3"], "twice"), ("s3", "list"), ([3], "list")):
+        # `then` is optional: a bad one is cut down to what is usable, never a reason to lose the round.
+        for then, kept in ((None, []), (["s2"], []), (["s7", "s1"], ["s1"]), (["s3", "s3"], ["s3"]),
+                           ("s3", []), ([3, "s3"], ["s3"])):
             with self.subTest(then=then):
-                self.write("decision.json", json.dumps({"accept": "s2", "then": then}))
-                self.assert_error(lambda: agents.read_decision(self.out, ["s1", "s2", "s3"]), fragment)
+                self.write("decision.json", json.dumps({"accept": "s2", "then": then, "reason": "r"}))
+                self.assertEqual(agents.read_decision(self.out, ["s1", "s2", "s3"]), ("s2", "r", kept))
         self.write("decision.json", json.dumps({"accept": "s7"}))
         self.assert_error(lambda: agents.read_decision(self.out, ["s1"]), "s7")
         self.write("decision.json", json.dumps({"reason": "forgot"}))
