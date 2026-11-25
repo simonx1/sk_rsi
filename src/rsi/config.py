@@ -69,6 +69,7 @@ class Config:
     draft: bool = False
     branch_prefix: str = "rsi/"
     confirm: bool = False                # measure a chosen candidate once more before keeping it
+    aggregate: str = "mean"              # how a version's runs on one task are combined: "mean" or "median"
     progress_line: str = progress.DEFAULT_LINE
     progress_events: str = "all"         # lines for finished task runs and agent calls: "all", "failures", "none"
     progress_interval_s: float = 5.0     # redraw period on a terminal
@@ -108,6 +109,7 @@ _SCHEMA = (
     ("tasks", "heldout", "heldout", str, "endpoints"),
     ("tasks", "paired", "paired", bool, False),
     ("tasks", "confirm", "confirm", bool, False),
+    ("tasks", "aggregate", "aggregate", str, "mean"),
     ("commands", "run_task", "run_task", str, _REQUIRED),
     ("commands", "check", "check", str, None),
     ("commands", "ingest", "ingest", str, None),
@@ -188,6 +190,7 @@ def _check_ranges(cfg: Config) -> None:
         (0 <= cfg.max_infra_failure_rate <= 1, "budget.max_infra_failure_rate must be from 0 to 1"),
         (cfg.min_gain is None or cfg.min_gain >= 0, "budget.min_gain must be 0 or more"),
         (not cfg.confirm or cfg.paired, "tasks.confirm needs tasks.paired = true"),
+        (cfg.aggregate in ("mean", "median"), 'tasks.aggregate must be "mean" or "median"'),
         (cfg.progress_events in ("all", "failures", "none"), 'progress.events must be "all", "failures" or "none"'),
         (cfg.progress_interval_s > 0, "progress.interval_s must be positive"),
         (cfg.progress_log_interval_s > 0, "progress.log_interval_s must be positive"),

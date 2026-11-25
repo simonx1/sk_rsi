@@ -7,6 +7,7 @@ import math
 import os
 import re
 import shutil
+import statistics
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -130,12 +131,16 @@ def run_rollout(cfg: Config, task: dict, rollout: int, checkout: Path, out_dir: 
 class EvalResult:
     task_ids: list[str]
     rollouts: list[Rollout]
+    aggregate: str = "mean"   # how one task's runs are combined: "mean" or "median"
+
+    def _combine(self, values: list[float]) -> float:
+        return statistics.median(values) if self.aggregate == "median" else sum(values) / len(values)
 
     def task_scores(self) -> dict[str, float]:
         scores: dict[str, list[float]] = {task_id: [] for task_id in self.task_ids}
         for r in self.rollouts:
             scores[r.task_id].append(r.score)
-        return {task_id: sum(v) / len(v) for task_id, v in scores.items() if v}
+        return {task_id: self._combine(v) for task_id, v in scores.items() if v}
 
     def score(self) -> float:
         per_task = self.task_scores()
@@ -155,13 +160,13 @@ class EvalResult:
         return sum(1 for r in self.rollouts if r.error) / len(self.rollouts)
 
     def task_metrics(self) -> dict[str, dict[str, float]]:
-        """Per task, the mean of each metric over the rollouts that ran and reported it."""
+        """Per task, each metric combined over the rollouts that ran and reported it (mean or median)."""
         values: dict[str, dict[str, list[float]]] = {}
         for r in self.rollouts:
             if r.error is None:
                 for name, value in r.metrics.items():
                     values.setdefault(r.task_id, {}).setdefault(name, []).append(value)
-        return {task_id: {name: sum(v) / len(v) for name, v in by_name.items()}
+        return {task_id: {name: self._combine(v) for name, v in by_name.items()}
                 for task_id, by_name in values.items()}
 
     def metric_means(self) -> dict[str, float]:
@@ -241,7 +246,7 @@ def evaluate_many(
     results = {}
     for name, rollouts in collected.items():
         rollouts.sort(key=lambda r: (order[r.task_id], r.rollout))
-        results[name] = EvalResult([task["id"] for task in task_list], rollouts)
+        results[name] = EvalResult([task["id"] for task in task_list], rollouts, cfg.aggregate)
     return results
 
 

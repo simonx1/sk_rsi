@@ -194,6 +194,11 @@ branch_prefix = "sk-rsi-"
             with self.subTest(fragment=fragment):
                 self.assert_error(text, fragment)
 
+    def test_aggregate(self):
+        self.assertEqual(config.parse(MINIMAL).aggregate, "mean")
+        self.assertEqual(config.parse(MINIMAL + '\n[tasks]\naggregate = "median"\n').aggregate, "median")
+        self.assert_error(MINIMAL + '\n[tasks]\naggregate = "mode"\n', 'tasks.aggregate must be "mean" or "median"')
+
     def test_progress_defaults_and_keys(self):
         cfg = config.parse(MINIMAL)
         self.assertEqual((cfg.progress_line, cfg.progress_events, cfg.progress_interval_s, cfg.progress_log_interval_s),

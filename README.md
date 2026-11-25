@@ -221,6 +221,10 @@ a gain. With `confirm = true` (it needs `paired = true`) the chosen candidate an
 are measured once more, in a batch of their own, and only that second measurement decides. Its
 numbers are the ones recorded. This costs two more sets of task runs per accepted round.
 
+**Median of runs.** With `aggregate = "median"` under `[tasks]`, a version's runs on one task are
+combined by their median rather than their mean, for the score and for every metric. One slow or
+failed run then cannot decide a round alone. Tasks are still averaged with each other.
+
 **The current version.** `run_task` sees `RSI_CURRENT=1` when it scores the version the loop holds
 now (a version that passed before), and an empty `RSI_CURRENT` for a candidate. A scorer can treat a
 failure of the current version as a failed measurement (exit non-zero) rather than a score of 0, so a

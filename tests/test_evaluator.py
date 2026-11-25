@@ -299,3 +299,30 @@ class EvaluateTest(unittest.TestCase):
     def test_no_tasks_scores_zero(self):
         res = self.run_tasks([])
         self.assertEqual((res.score(), res.infra_failure_rate(), res.passed_total(0.5)), (0.0, 0.0, (0, 0)))
+
+
+class AggregateTest(unittest.TestCase):
+    """A version's runs on one task, combined by their mean (the default) or their median."""
+
+    def runs(self, task, *values):
+        return [evaluator.Rollout(task, k, score, None if score else "exit code 3", "", {"wall_s": wall} if wall else {})
+                for k, (score, wall) in enumerate(values, 1)]
+
+    def result(self, aggregate):
+        rollouts = (self.runs("a", (0.8, 520), (0.8, 528), (0.5, 842), (0.9, 492))
+                    + self.runs("b", (1.0, 400), (0.0, None), (1.0, 380)))
+        return evaluator.EvalResult(["a", "b"], rollouts, aggregate)
+
+    def test_mean_is_the_default(self):
+        result = evaluator.EvalResult(["a"], self.runs("a", (0.8, 520), (0.5, 842)))
+        self.assertEqual(result.task_scores(), {"a": 0.65})
+        self.assertEqual(result.metric_means(), {"wall_s": 681.0})
+
+    def test_median(self):
+        result = self.result("median")
+        self.assertEqual(result.task_scores(), {"a": 0.8, "b": 1.0})     # even count: the middle two
+        self.assertEqual(result.score(), 90.0)                          # tasks are still averaged
+        self.assertEqual(result.task_metrics(), {"a": {"wall_s": 524.0}, "b": {"wall_s": 390.0}})
+        self.assertEqual(result.metric_means(), {"wall_s": 457.0})
+        self.assertEqual([row["score"] for row in result.table(0.5)], [0.8, 1.0])
+        self.assertEqual(self.result("mean").task_scores()["a"], 0.75)

@@ -131,6 +131,10 @@ class RunTest(CliCase):
         _, out, _ = self.rsi("run", "--dry-run", "--project", project)
         self.assertIn("up to 90 task runs", out)
         self.assertIn("a chosen change is measured once more beside the current version before it is kept", out)
+        self.assertNotIn("median", out)
+        self.write_config(project, tasks_extra="aggregate = \"median\"")
+        self.assertIn("a version's runs on a task are combined by their median",
+                      self.rsi("run", "--dry-run", "--project", project)[1])
 
     def test_run_then_status(self):
         project = self.make_toy()

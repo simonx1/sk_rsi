@@ -125,6 +125,9 @@ class DocsTest(unittest.TestCase):
         self.assertIn("Edits that were not kept", how)
         self.assertIn("earlier runs", how)
 
+    def test_readme_documents_the_median(self):
+        self.assertIn('**Median of runs.** With `aggregate = "median"`', (ROOT / "README.md").read_text())
+
     def test_template_mentions_progress(self):
         self.assertIn("# [progress]", cli.TEMPLATE)
         self.assertIn("# line = ", cli.TEMPLATE)
