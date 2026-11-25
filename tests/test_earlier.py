@@ -169,6 +169,15 @@ class NotKeptTest(unittest.TestCase):
         self.assertTrue(title.startswith("Cache the parsed rules y"))
         self.assertTrue(title.endswith("…"))
 
+    def test_a_run_on_another_benchmark_is_marked(self):
+        for run, benchmark in (("R1", "ci-v1"), ("R2", "ci-v2"), ("R3", None)):
+            self.candidate(run, 0, "s1", status="dropped", reason="x")
+            path = self.layout.run(run).state_file
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"rounds_log": [], **({"benchmark": benchmark} if benchmark else {})}))
+        entries, _ = earlier.not_kept(self.layout, "R9", 0, benchmark="ci-v2")
+        self.assertEqual({e["run"]: e.get("benchmark") for e in entries}, {"R1": "ci-v1", "R2": None, "R3": None})
+
     def test_no_runs_yet(self):
         self.assertEqual(self.outcomes(), ([], 0))
 

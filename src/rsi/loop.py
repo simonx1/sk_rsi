@@ -722,7 +722,7 @@ def _agent(ctx: Ctx, role: str, prompt: str, cwd: Path, out: Path, env: dict[str
 
 def _earlier(ctx: Ctx) -> tuple[list[dict], int, str, Path]:
     """Edits from this run's earlier rounds and from earlier runs that were not kept, for the prompts."""
-    entries, omitted = earlier.not_kept(ctx.layout, ctx.state.run, ctx.state.round)
+    entries, omitted = earlier.not_kept(ctx.layout, ctx.state.run, ctx.state.round, benchmark=ctx.state.benchmark)
     return entries, omitted, ctx.state.run, ctx.rl.history
 
 

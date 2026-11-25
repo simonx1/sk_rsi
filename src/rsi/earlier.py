@@ -89,11 +89,13 @@ def _outcome(result: dict, decision: dict | None, before: float | None) -> str:
     return "; ".join(parts)
 
 
-def not_kept(layout: Layout, run: str, round_no: int, limit: int = 30) -> tuple[list[dict], int]:
+def not_kept(layout: Layout, run: str, round_no: int, limit: int = 30,
+             benchmark: str | None = None) -> tuple[list[dict], int]:
     """Candidates with a manifest that were not accepted, newest first, without `run`'s rounds from
     `round_no` on. Returns at most `limit` of them and how many more there are.
 
-    Each entry: {"run", "folder" (relative to the runs folder), "sample", "title", "outcome"}.
+    Each entry: {"run", "folder" (relative to the runs folder), "sample", "title", "outcome"}, and
+    "benchmark" when that run was scored on a benchmark other than `benchmark`, so its scores differ.
     Unreadable files are skipped: an old or half-written folder must never stop a round.
     """
     found: list[dict] = []
@@ -103,13 +105,13 @@ def not_kept(layout: Layout, run: str, round_no: int, limit: int = 30) -> tuple[
         return [], 0
     for run_folder in run_folders:
         try:
-            found += _run_entries(layout, run_folder, run, round_no)
+            found += _run_entries(layout, run_folder, run, round_no, benchmark)
         except Exception:  # a damaged folder is skipped, never a reason to stop a round
             continue
     return found[:limit], max(len(found) - limit, 0)
 
 
-def _run_entries(layout: Layout, run_folder: Path, run: str, round_no: int) -> list[dict]:
+def _run_entries(layout: Layout, run_folder: Path, run: str, round_no: int, benchmark: str | None) -> list[dict]:
     history = run_folder / "history"
     if not history.is_dir():
         return []
@@ -117,6 +119,8 @@ def _run_entries(layout: Layout, run_folder: Path, run: str, round_no: int) -> l
     log = state.get("rounds_log") if isinstance(state, dict) else None
     before = {entry.get("round"): entry.get("score_before") for entry in (log if isinstance(log, list) else ())
               if isinstance(entry, dict)}
+    scored_on = state.get("benchmark") if isinstance(state, dict) else None
+    other = scored_on if isinstance(scored_on, str) and benchmark and scored_on != benchmark else None
     rounds = sorted(((n, p) for p in history.iterdir() if (n := _round_number(p)) is not None), reverse=True)
     entries = []
     for number, round_folder in rounds:
@@ -136,7 +140,7 @@ def _run_entries(layout: Layout, run_folder: Path, run: str, round_no: int) -> l
             except Exception:
                 continue
             if entry is not None:
-                entries.append(entry)
+                entries.append({**entry, "benchmark": other} if other else entry)
     return entries
 
 

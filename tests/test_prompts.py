@@ -135,6 +135,14 @@ class EarlierAttemptsPromptTest(unittest.TestCase):
         self.assertNotIn("older ones", prompts.earlier_section(self.ENTRIES, 0, "R2", Path("/h")))
         self.assertIsNone(prompts.earlier_section([], 0, "R2", Path("/h")))
 
+    def test_another_benchmark_is_named(self):
+        entries = [dict(self.ENTRIES[0], benchmark="ci-v1"), self.ENTRIES[1]]
+        text = prompts.earlier_section(entries, 0, "R2", Path("/h"))
+        self.assertIn("- R1 round-0/s1 (scored on ci-v1) \"Cache the 'rules'\": dropped", text)
+        self.assertIn('- R2 round-0/s3 (this run) "Trim the list": dropped: x', text)
+        self.assertIn("compare its measured changes, not its score", text)
+        self.assertNotIn("measured changes, not its score", prompts.earlier_section(self.ENTRIES, 0, "R2", Path("/h")))
+
     def test_proposer_and_screen_prompts_carry_it(self):
         earlier = (self.ENTRIES, 0, "R2", Path("/state/runs/R2/history"))
         proposer = prompts.proposer_prompt(CFG, "toy-v1", MEMORY, TABLE, [], 33.33, "abc123", Path("/f"),
