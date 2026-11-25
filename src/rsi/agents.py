@@ -259,7 +259,8 @@ def read_screen(out_dir: Path, samples: list[str]) -> dict[str, tuple[bool, str]
     return verdicts
 
 
-def read_decision(out_dir: Path, samples: list[str]) -> tuple[str | None, str]:
+def read_decision(out_dir: Path, samples: list[str]) -> tuple[str | None, str, list[str]]:
+    """The selector's choice, its reason, and the further candidates it would also keep, best first."""
     obj = _load(out_dir, "decision.json")
     if "accept" not in obj:
         raise AgentOutputError("decision.json needs an 'accept' key (a sample name or null)")
@@ -267,4 +268,16 @@ def read_decision(out_dir: Path, samples: list[str]) -> tuple[str | None, str]:
     if accept is not None and accept not in samples:
         raise AgentOutputError(f"decision.json accepts {accept!r}, which is not an evaluated candidate")
     reason = obj.get("reason", "")
-    return accept, reason if isinstance(reason, str) else ""
+    then = obj.get("then", [])
+    if accept is None:
+        then = []   # nothing chosen, so nothing to fall back to
+    if not isinstance(then, list) or not all(isinstance(s, str) for s in then):
+        raise AgentOutputError("decision.json 'then' must be a list of sample names")
+    for sample in then:
+        if sample not in samples:
+            raise AgentOutputError(f"decision.json 'then' names {sample!r}, which is not an evaluated candidate")
+        if sample == accept:
+            raise AgentOutputError(f"decision.json 'then' names {sample!r}, which it already accepts")
+    if len(set(then)) != len(then):
+        raise AgentOutputError("decision.json 'then' names a candidate twice")
+    return accept, reason if isinstance(reason, str) else "", then

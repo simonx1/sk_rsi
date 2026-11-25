@@ -218,7 +218,8 @@ def _dry_run(proj: projects.Project, rounds: int | None) -> int:
         return 2
     rounds = cfg.rounds if rounds is None else rounds
     total = loop.planned_task_runs(len(checked.evolve), len(checked.heldout), cfg.rollouts, rounds,
-                                   cfg.candidates, cfg.heldout == "every_round", cfg.paired, cfg.confirm)
+                                   cfg.candidates, cfg.heldout == "every_round", cfg.paired, cfg.confirm,
+                                   cfg.fallbacks)
     print(f"up to {total} task runs")
     print(f"  {_plural(len(checked.evolve), 'evolve task')}, {_plural(len(checked.heldout), 'held-out task')}, "
           f"{_plural(cfg.rollouts, 'rollout')} each")
@@ -227,6 +228,9 @@ def _dry_run(proj: projects.Project, rounds: int | None) -> int:
         print("  the current version is measured again in every round, beside the candidates")
         if cfg.confirm:
             print("  a chosen change is measured once more beside the current version before it is kept")
+            if cfg.fallbacks:
+                print("  if it does not hold up, the selector's next choice is measured the same way, "
+                      f"up to {cfg.fallbacks} more per round")
         print("  held-out scored once at the end, the starting and the final version together")
     if cfg.aggregate == "median":
         print("  a version's runs on a task are combined by their median")

@@ -23,6 +23,14 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(loop.planned_task_runs(1, 1, 4, 5, 3, every_round=False, paired=True, confirm=True), 132)
         self.assertEqual(loop.planned_task_runs(6, 6, 1, 2, 3, every_round=False, paired=True), 66)
 
+    def test_planned_runs_count_one_confirmation_per_allowed_choice(self):
+        one = loop.planned_task_runs(6, 6, 1, 2, 3, False, paired=True, confirm=True, fallbacks=0)
+        two = loop.planned_task_runs(6, 6, 1, 2, 3, False, paired=True, confirm=True, fallbacks=1)
+        self.assertEqual(one, 6 * (1 + 2 * (3 + 1 + 2)) + 12)
+        self.assertEqual(two - one, 6 * 2 * 2)           # one more confirmation batch (2 versions) per round
+        self.assertEqual(loop.planned_task_runs(6, 6, 1, 2, 3, False, paired=True, fallbacks=1),
+                         loop.planned_task_runs(6, 6, 1, 2, 3, False, paired=True))   # no confirmation: free
+
     def test_agent_steps_left(self):
         self.assertEqual(loop._agent_steps_left("baseline", 0, 5), 15)
         self.assertEqual(loop._agent_steps_left("ingest", 0, 5), 15)

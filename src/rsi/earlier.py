@@ -46,6 +46,9 @@ def _title(manifest: dict) -> str:
 
 def _guard(decision: dict | None, sample: str) -> str | None:
     """The guard that stopped this candidate after the selector chose it, if one did."""
+    guards = (decision or {}).get("guards")
+    if isinstance(guards, dict) and isinstance(guards.get(sample), str):
+        return guards[sample]   # one per candidate: a round can stop several of the selector's choices
     reason = str((decision or {}).get("reason") or "")
     if not reason.startswith(f"guard: {sample} "):
         return None

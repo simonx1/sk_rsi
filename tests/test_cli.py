@@ -129,7 +129,9 @@ class RunTest(CliCase):
     def test_dry_run_with_confirmation(self):
         project = self.make_toy(tasks_extra="paired = true\nconfirm = true")
         _, out, _ = self.rsi("run", "--dry-run", "--project", project)
-        self.assertIn("up to 90 task runs", out)
+        self.assertIn("up to 114 task runs", out)
+        self.assertIn("if it does not hold up, the selector's next choice is measured the same way, "
+                      "up to 1 more per round", out)
         self.assertIn("a chosen change is measured once more beside the current version before it is kept", out)
         self.assertNotIn("median", out)
         self.write_config(project, tasks_extra="aggregate = \"median\"")

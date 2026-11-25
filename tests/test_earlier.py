@@ -79,6 +79,21 @@ class NotKeptTest(unittest.TestCase):
         self.assertEqual(found["R1/history/round-1/s1"], "scored 70.00; not compared: selector failed: the agent timed out")
         self.assertEqual(found["R1/history/round-2/s1"], "scored 60.00")
 
+    def test_each_candidate_shows_its_own_guard(self):
+        self.candidate("R1", 0, "s1", status="evaluated", score=90.0, observed={})
+        self.candidate("R1", 0, "s2", status="evaluated", score=88.0, observed={})
+        folder = self.layout.run("R1").history / "round-0"
+        (folder / "decision.json").write_text(json.dumps({
+            "accept": None,
+            "reason": "guard: s1 did not hold up when measured again: it is past a limit: cost; "
+                      "guard: s2 gained 1.00 points, less than the 2.50 required; the selector's reason was: x",
+            "guards": {"s1": "guard: s1 did not hold up when measured again: it is past a limit: cost",
+                       "s2": "guard: s2 gained 1.00 points, less than the 2.50 required"}}))
+        found = {f: o for f, _, o in self.outcomes()[0]}
+        self.assertEqual(found["R1/history/round-0/s1"],
+                         "scored 90.00; guard: s1 did not hold up when measured again: it is past a limit: cost")
+        self.assertEqual(found["R1/history/round-0/s2"], "scored 88.00; guard: s2 gained 1.00 points, less than the 2.50 required")
+
     def test_damaged_history_never_stops_a_round(self):
         self.candidate("R1", 0, "s1", status="evaluated", score=50.0, observed=7, table=5)
         self.candidate("R1", 0, "s2", status="dropped", reason=["not", "text"])

@@ -128,6 +128,11 @@ class DocsTest(unittest.TestCase):
     def test_readme_documents_the_median(self):
         self.assertIn('**Median of runs.** With `aggregate = "median"`', (ROOT / "README.md").read_text())
 
+    def test_readme_documents_fallback_choices(self):
+        text = " ".join((ROOT / "README.md").read_text().split())
+        self.assertIn("**Next choices.**", text)
+        self.assertIn("`fallbacks`", text)
+
     def test_template_mentions_progress(self):
         self.assertIn("# [progress]", cli.TEMPLATE)
         self.assertIn("# line = ", cli.TEMPLATE)

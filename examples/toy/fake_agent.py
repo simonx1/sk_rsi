@@ -53,7 +53,10 @@ def main():
         rows = [{"sample": s, "keep": keep, "reason": "scripted"} for s, keep in answer.items()]
         (out / "screen.json").write_text(json.dumps({"screen": rows}))
     else:
-        (out / "decision.json").write_text(json.dumps({"accept": answer, "reason": "scripted"}))
+        # A plain sample name, or a whole decision such as {"accept": "s1", "then": ["s2"]}.
+        decision = dict(answer) if isinstance(answer, dict) else {"accept": answer}
+        decision.setdefault("reason", "scripted")
+        (out / "decision.json").write_text(json.dumps(decision))
     return 0
 
 

@@ -81,6 +81,8 @@ class SelectorPromptTest(unittest.TestCase):
         self.assertIn("Regressed: t01", text)
         self.assertIn("/state/out/decision.json", text)
         self.assertIn("more than 1.00 points below", text)
+        self.assertIn('{"accept": "s2", "then": ["s3"], "reason": "why"}', text)
+        self.assertIn("the next one in `then` is taken", text)
 
     def test_new_root_cause_is_shown_as_text(self):
         item = dict(self.ITEM, manifest=dict(self.ITEM["manifest"], root_cause={"new": "weak retrieval"}))

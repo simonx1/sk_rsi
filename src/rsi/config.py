@@ -60,6 +60,7 @@ class Config:
     repo: str | None = None              # set only in a config kept outside the repository
     paired: bool = False                 # measure the current harness beside the candidates
     min_gain: float | None = None        # score points a candidate must gain to be accepted
+    fallbacks: int = 1                   # more chosen candidates to measure again when one does not hold up
     constraints: tuple[Constraint, ...] = ()
     agent_cli: str = "claude"            # which built-in agent command to use
     agent_model: str | None = None
@@ -122,6 +123,7 @@ _SCHEMA = (
     ("budget", "tolerance", "tolerance", float, 1.0),
     ("budget", "max_infra_failure_rate", "max_infra_failure_rate", float, 0.3),
     ("budget", "min_gain", "min_gain", float, None),
+    ("budget", "fallbacks", "fallbacks", int, 1),
     ("agents", "proposer", "proposer", str, None),
     ("agents", "selector", "selector", str, None),
     ("agents", "cli", "agent_cli", str, "claude"),
@@ -189,6 +191,7 @@ def _check_ranges(cfg: Config) -> None:
         (cfg.tolerance >= 0, "budget.tolerance must be 0 or more"),
         (0 <= cfg.max_infra_failure_rate <= 1, "budget.max_infra_failure_rate must be from 0 to 1"),
         (cfg.min_gain is None or cfg.min_gain >= 0, "budget.min_gain must be 0 or more"),
+        (cfg.fallbacks >= 0, "budget.fallbacks must be 0 or more"),
         (not cfg.confirm or cfg.paired, "tasks.confirm needs tasks.paired = true"),
         (cfg.aggregate in ("mean", "median"), 'tasks.aggregate must be "mean" or "median"'),
         (cfg.progress_events in ("all", "failures", "none"), 'progress.events must be "all", "failures" or "none"'),

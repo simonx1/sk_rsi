@@ -308,7 +308,9 @@ def select_prompt(
         "# Output\n\n"
         f"Write `{out_dir}/decision.json`:\n\n"
         "```json\n"
-        '{"accept": "s2", "reason": "why"}\n'
+        '{"accept": "s2", "then": ["s3"], "reason": "why"}\n'
         "```\n\n"
-        'Use `"accept": null` to keep the current harness.',
+        'Use `"accept": null` to keep the current harness. `then` is optional: the other candidates you '
+        "would also keep, best first. Rules in code can still stop your choice: a limit, too small a gain, "
+        "or a second measurement that does not hold up. Then the next one in `then` is taken.",
     ] if section) + "\n"

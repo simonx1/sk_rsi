@@ -194,6 +194,11 @@ branch_prefix = "sk-rsi-"
             with self.subTest(fragment=fragment):
                 self.assert_error(text, fragment)
 
+    def test_fallbacks(self):
+        self.assertEqual(config.parse(MINIMAL).fallbacks, 1)
+        self.assertEqual(config.parse(MINIMAL + "\n[budget]\nfallbacks = 0\n").fallbacks, 0)
+        self.assert_error(MINIMAL + "\n[budget]\nfallbacks = -1\n", "budget.fallbacks must be 0 or more")
+
     def test_aggregate(self):
         self.assertEqual(config.parse(MINIMAL).aggregate, "mean")
         self.assertEqual(config.parse(MINIMAL + '\n[tasks]\naggregate = "median"\n').aggregate, "median")

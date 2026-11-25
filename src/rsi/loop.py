@@ -41,13 +41,16 @@ def _say(message: str) -> None:
 
 
 def planned_task_runs(evolve: int, heldout: int, rollouts: int, rounds: int, candidates: int,
-                      every_round: bool, paired: bool = False, confirm: bool = False) -> int:
+                      every_round: bool, paired: bool = False, confirm: bool = False, fallbacks: int = 0) -> int:
     """The most task runs a run can start: every candidate survives screening in every round.
 
     With paired measurement the current harness is scored again beside the candidates of every
-    round, and held-out is scored once at the end, for the starting and the final harness.
+    round, and held-out is scored once at the end, for the starting and the final harness. With
+    confirmation, each chosen candidate is measured again beside the current harness, and up to
+    `fallbacks` further choices may be when one does not hold up.
     """
-    evolve_runs = evolve * rollouts * (1 + rounds * (candidates + (1 if paired else 0) + (2 if confirm else 0)))
+    confirmations = 2 * (1 + min(fallbacks, candidates - 1)) if confirm else 0
+    evolve_runs = evolve * rollouts * (1 + rounds * (candidates + (1 if paired else 0) + confirmations))
     heldout_runs = heldout * rollouts * ((rounds + 1) if every_round else 2)
     return evolve_runs + heldout_runs
 
@@ -968,29 +971,65 @@ def _select(ctx: Ctx) -> None:
         with agents.read_only(_shared(ctx)):
             decision, failure = _agent(ctx, "selector", prompt, ctx.main_wt, out, {"RSI_STAGE": "select"},
                                        lambda folder: agents.read_decision(folder, samples))
+        then: list[str] = []
         if failure:
             reason = f"selector failed: {failure[1]}"
         else:
-            accept, reason = decision
+            accept, reason, then = decision
         if accept:
-            # Rules in code that override the selector, in this order: limits, minimum gain, tolerance.
-            chosen = next(c for c in evaluated if c["sample"] == accept)
-            blocked = measure.blocking(chosen.get("limits") or [])
-            gained = round(chosen["score"] - current, 2)
-            said = f"; the selector's reason was: {reason}"
-            if blocked:
-                reason = f"guard: {accept} is past a limit: {measure.describe(blocked[0])}{said}"
-                accept = None
-            elif cfg.min_gain is not None and gained < cfg.min_gain:
-                reason = f"guard: {accept} gained {gained:.2f} points, less than the {cfg.min_gain:.2f} required{said}"
-                accept = None
-            elif _below_tolerance(current, chosen["score"], cfg.tolerance):
-                reason = (f"guard: {accept} scored {chosen['score']:.2f}, more than {cfg.tolerance:.2f} "
-                          f"below the current {current:.2f}; the selector's reason was: {reason}")
-                accept = None
+            # Rules in code that override the selector. The first of its choices that passes them is
+            # taken; the ones after it are kept, in order, for when a confirmation does not hold up.
+            guards: dict[str, str] = {}
+            eligible = []
+            for sample in [accept] + then:
+                chosen = next(c for c in evaluated if c["sample"] == sample)
+                stopped = _guard(cfg, sample, chosen, current)
+                if stopped:
+                    guards[sample] = stopped
+                else:
+                    eligible.append(sample)
+            st.decision = _decision(eligible[0] if eligible else None, reason, guards, eligible[1:])
+            _write_history(ctx)
+            st.step = "confirm" if st.decision["accept"] and cfg.confirm else "record"
+            return
     st.decision = {"accept": accept, "reason": reason}
     _write_history(ctx)
     st.step = "confirm" if accept and cfg.confirm else "record"
+
+
+def _guard(cfg: config.Config, sample: str, chosen: dict, current: float, again: str = "") -> str | None:
+    """Why the rules in code stop a candidate, or None. In this order: limits, minimum gain, tolerance.
+
+    `again` names a second measurement, as in "did not hold up when measured again: ".
+    """
+    blocked = measure.blocking(chosen.get("limits") or [])
+    gained = round(chosen["score"] - current, 2)
+    if blocked:
+        return f"guard: {sample} {again}is past a limit: {measure.describe(blocked[0])}"
+    if cfg.min_gain is not None and gained < cfg.min_gain:
+        return f"guard: {sample} {again}gained {gained:.2f} points, less than the {cfg.min_gain:.2f} required"
+    if _below_tolerance(current, chosen["score"], cfg.tolerance):
+        return (f"guard: {sample} {again}scored {chosen['score']:.2f}, more than {cfg.tolerance:.2f} "
+                f"below the current {current:.2f}")
+    return None
+
+
+def _decision(accept: str | None, selector_reason: str, guards: dict[str, str], then: list[str],
+              tried: list[str] | None = None) -> dict:
+    """A round's decision: the candidate taken, why, each guard that stopped one, and what is left."""
+    stopped = "; ".join(guards.values())
+    if not guards:
+        reason = selector_reason
+    elif accept:
+        reason = f"{stopped}; so the selector's next choice, {accept}, was taken; the selector's reason was: {selector_reason}"
+    else:
+        reason = f"{stopped}; the selector's reason was: {selector_reason}"
+    decision = {"accept": accept, "reason": reason}
+    # Only what a later step needs: the selector's own words, the guards, and the choices left.
+    extra = {"selector_reason": selector_reason if reason != selector_reason else None, "guards": guards,
+             "then": then, "tried": tried}
+    decision.update({key: value for key, value in extra.items() if value})
+    return decision
 
 
 def _assess(ctx: Ctx, c: dict, result: evaluator.EvalResult, baseline: evaluator.EvalResult) -> None:
@@ -1012,38 +1051,43 @@ def _confirm(ctx: Ctx) -> None:
     it. This second, independent measurement decides, and its numbers are the ones recorded.
     """
     st, cfg = ctx.state, ctx.cfg
-    chosen = next(c for c in st.candidates if c["sample"] == st.decision["accept"])
+    decision = st.decision
+    chosen = next(c for c in st.candidates if c["sample"] == decision["accept"])
+    tried = list(decision.get("tried") or [])
     workspace.clean(Path(chosen["worktree"]))
-    base_dir, cand_dir = f"{st.eval_sha}.c{st.round}", f"{chosen['sha']}.c{st.round}"
+    # The first confirmation keeps its old folder name, so a run stopped there resumes. Each later one
+    # measures the current version again, in its own folder, beside its own candidate.
+    base_dir = f"{st.eval_sha}.c{st.round}" + (f"-{chosen['sample']}" if tried else "")
+    cand_dir = f"{chosen['sha']}.c{st.round}"
     targets = {BASELINE: (ctx.main_wt, ctx.rl.feedback / base_dir), chosen["sample"]: (Path(chosen["worktree"]),
                                                                                        ctx.rl.feedback / cand_dir)}
     _expect(ctx, runs=len(targets) * len(ctx.evolve) * cfg.rollouts)
     results = evaluator.evaluate_many(cfg, ctx.evolve, targets, st.benchmark, current={BASELINE},
                                       **_progress(ctx))
     baseline, result = results[BASELINE], results[chosen["sample"]]
-    again = "did not hold up when measured again"
+    selector_reason = decision.get("selector_reason", decision["reason"])
+    guards = dict(decision.get("guards") or {})
     if any(r.error for r in baseline.rollouts):
-        st.decision = {"accept": None, "reason": f"guard: {chosen['sample']} was not measured again: the "
-                                                 "baseline had failed runs; nothing can be compared"}
+        guards[chosen["sample"]] = (f"guard: {chosen['sample']} was not measured again: the baseline had "
+                                    "failed runs; nothing can be compared")
+        st.decision = _decision(None, selector_reason, guards, [], tried + [chosen["sample"]])
     else:
         st.eval_dir = base_dir
         _assess(ctx, chosen, result, baseline)
         chosen["eval_dir"] = cand_dir
-        current, gained = baseline.score(), round(chosen["score"] - baseline.score(), 2)
-        blocked = measure.blocking(chosen["limits"])
-        reason = None
-        if blocked:
-            reason = f"guard: {chosen['sample']} {again}: it is past a limit: {measure.describe(blocked[0])}"
-        elif cfg.min_gain is not None and gained < cfg.min_gain:
-            reason = (f"guard: {chosen['sample']} {again}: it gained {gained:.2f} points, "
-                      f"less than the {cfg.min_gain:.2f} required")
-        elif _below_tolerance(current, chosen["score"], cfg.tolerance):
-            reason = (f"guard: {chosen['sample']} {again}: it scored {chosen['score']:.2f}, more than "
-                      f"{cfg.tolerance:.2f} below the current {current:.2f}")
-        if reason:
-            st.decision = {"accept": None, "reason": f"{reason}; the selector's reason was: {st.decision['reason']}"}
-        else:
+        stopped = _guard(cfg, chosen["sample"], chosen, baseline.score(), "did not hold up when measured again: it ")
+        if not stopped:
             st.decision["confirmed"] = True
+        else:
+            guards[chosen["sample"]] = stopped
+            tried.append(chosen["sample"])
+            left = list(decision.get("then") or [])
+            if left and len(tried) <= cfg.fallbacks:
+                # The selector's next choice is confirmed the same way, in a step of its own.
+                st.decision = _decision(left[0], selector_reason, guards, left[1:], tried)
+                _write_history(ctx)
+                return
+            st.decision = _decision(None, selector_reason, guards, [], tried)
     _write_history(ctx)
     st.step = "record"
 

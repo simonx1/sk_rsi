@@ -221,6 +221,13 @@ a gain. With `confirm = true` (it needs `paired = true`) the chosen candidate an
 are measured once more, in a batch of their own, and only that second measurement decides. Its
 numbers are the ones recorded. This costs two more sets of task runs per accepted round.
 
+**Next choices.** The selector may list, under `"then"`, the other candidates it would also keep,
+best first. When a rule in code stops its choice at selection (a limit, too small a gain), the loop
+takes the next one that passes. When a confirmed choice does not hold up, the next one is confirmed
+the same way, beside a fresh measurement of the current version; `fallbacks` under `[budget]` (default
+1) caps how many more confirmations a round may make. Each costs two more sets of task runs, and
+`rsi run --dry-run` counts them.
+
 **Median of runs.** With `aggregate = "median"` under `[tasks]`, a version's runs on one task are
 combined by their median rather than their mean, for the score and for every metric. One slow or
 failed run then cannot decide a round alone. Tasks are still averaged with each other.

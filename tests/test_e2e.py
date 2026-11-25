@@ -601,6 +601,75 @@ class PairedTest(ToyCase):
             entry["reason"])
         self.assertEqual(st.scores, [33.33, 33.33])
 
+    TWO_CANDIDATES = {
+        "proposer": {"0": {
+            "s1": {"edits": [{"path": "rules.txt", "append": "charged => billing\nerror => bug\n"}],
+                   "manifest": {"root_cause": {"new": "too few keywords"}, "what": "Add 'charged' and 'error'.",
+                                "predicted": ["t03", "t05"], "risk": "none"}},
+            "s2": {"edits": [{"path": "rules.txt", "append": "charged => billing\n"}],
+                   "manifest": {"root_cause": {"new": "too few keywords"}, "what": "Add 'charged'.",
+                                "predicted": ["t03"], "risk": "none"}}}},
+        "screen": {"0": {"s1": True, "s2": True}},
+        "select": {"0": {"accept": "s1", "then": ["s2"]}},
+    }
+
+    def two_candidates(self, **settings):
+        script = self.tmp / "two.json"
+        script.write_text(json.dumps(self.TWO_CANDIDATES))
+        project = self.make_toy(rounds=1, candidates=2, **settings)
+        os.environ["FAKE_AGENT_SCRIPT"] = str(script)
+        return project
+
+    def test_a_first_choice_past_a_limit_falls_to_the_next(self):
+        # s1 adds two rules (+100%), s2 one (+50%); the limit allows +60%.
+        project = self.two_candidates(metrics=True, tail='[[constraints]]\nmetric = "rules"\nmax_increase_pct = 60')
+        st = loop.run(project, promote=False)
+        entry = st.rounds_log[0]
+        self.assertEqual(entry["accepted"], "s2")
+        self.assertIn("guard: s1 is past a limit", entry["reason"])
+        self.assertIn("so the selector's next choice, s2, was taken", entry["reason"])
+        decision = history(st, 0, "decision.json")
+        self.assertEqual(set(decision["guards"]), {"s1"})
+
+    def test_a_first_choice_that_does_not_hold_up_falls_to_the_next(self):
+        project = self.two_candidates(tasks_extra="paired = true\nconfirm = true", budget_extra="min_gain = 10")
+        self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 1.0, ("confirm", 0): "0.5 /r0-s1"})
+        st = loop.run(project, promote=False)
+        entry = st.rounds_log[0]
+        self.assertEqual(entry["accepted"], "s2")
+        self.assertEqual((entry["score_before"], entry["score_after"]), (33.33, 50.0))
+        self.assertIn("guard: s1 did not hold up when measured again", entry["reason"])
+        rl = Layout("toy").run(st.run)
+        s2 = history(st, 0, "s2/result.json")["sha"]
+        for folder in (f"{st.start_sha}.c0", f"{st.start_sha}.c0-s2", f"{s2}.c0"):   # each confirmation re-measures main
+            self.assertEqual(len(list((rl.feedback / folder).rglob(evaluator.MARKER))), 6, folder)
+
+    def test_no_fallbacks_keeps_nothing_when_the_first_does_not_hold_up(self):
+        project = self.two_candidates(tasks_extra="paired = true\nconfirm = true",
+                                      budget_extra="min_gain = 10\nfallbacks = 0")
+        self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 1.0, ("confirm", 0): "0.5 /r0-s1"})
+        st = loop.run(project, promote=False)
+        self.assertIsNone(st.rounds_log[0]["accepted"])
+        self.assertFalse((Layout("toy").run(st.run).feedback / f"{st.start_sha}.c0-s2").exists())
+
+    def test_a_resume_during_the_second_confirmation(self):
+        project = self.two_candidates(tasks_extra="paired = true\nconfirm = true", budget_extra="min_gain = 10")
+        self.conditions({("baseline", 0): 1.0, ("evaluate", 0): 1.0, ("confirm", 0): "0.5 /r0-s1"})
+        real, counter = evaluator.run_rollout, itertools.count(1)
+
+        def dies_in_the_second_confirmation(cfg, task, rollout, checkout, out_dir, benchmark, *rest):
+            if ".c0-s2" in str(out_dir) and next(counter) == 4:
+                raise RuntimeError("killed")
+            return real(cfg, task, rollout, checkout, out_dir, benchmark, *rest)
+
+        with mock.patch.object(evaluator, "run_rollout", dies_in_the_second_confirmation):
+            with self.assertRaises(RuntimeError):
+                loop.run(project, promote=False)
+        st = loop.run(project, promote=False)
+        self.assertEqual(st.rounds_log[0]["accepted"], "s2")
+        rl = Layout("toy").run(st.run)
+        self.assertEqual(len(list((rl.feedback / f"{st.start_sha}.c0").rglob(evaluator.MARKER))), 6)
+
     def test_the_next_round_reads_the_newest_results(self):
         project = self.make_toy(tasks_extra="paired = true")
         st = loop.run(project)
